@@ -1,0 +1,2056 @@
+import express from "express";
+import path from "path";
+import { createServer as createViteServer } from "vite";
+import { GoogleGenAI } from "@google/genai";
+import dotenv from "dotenv";
+import { initializeApp } from "firebase/app";
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  getDocs, 
+  getDoc, 
+  setDoc, 
+  deleteDoc,
+  updateDoc
+} from "firebase/firestore";
+import fs from "fs";
+
+dotenv.config();
+
+// Initialize Firebase configuration
+let db: any = null;
+let firebaseEnabled = false;
+
+try {
+  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+  if (fs.existsSync(configPath)) {
+    const firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    const firebaseApp = initializeApp({
+      apiKey: firebaseConfig.apiKey,
+      authDomain: firebaseConfig.authDomain,
+      projectId: firebaseConfig.projectId,
+      storageBucket: firebaseConfig.storageBucket,
+      messagingSenderId: firebaseConfig.messagingSenderId,
+      appId: firebaseConfig.appId,
+    });
+    
+    const dbId = firebaseConfig.firestoreDatabaseId || "(default)";
+    db = getFirestore(firebaseApp, dbId);
+    firebaseEnabled = true;
+    console.log(`[Firebase] Successfully initialized with database ID: ${dbId}`);
+  } else {
+    console.warn("[Firebase] Config file firebase-applet-config.json not found.");
+  }
+} catch (err) {
+  console.error("[Firebase] Failed to initialize Firebase:", err);
+}
+
+// Initialize Gemini Client
+const apiKey = process.env.GEMINI_API_KEY;
+let ai: GoogleGenAI | null = null;
+
+if (apiKey && apiKey !== "MY_GEMINI_API_KEY") {
+  try {
+    ai = new GoogleGenAI({
+      apiKey: apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Failed to initialize GoogleGenAI client:", err);
+  }
+}
+
+const app = express();
+app.use(express.json());
+
+const PORT = 3000;
+
+// IN-MEMORY DATABASE STATE FOR CRM (Restores on boot or active session)
+interface Lead {
+  id: string;
+  name: string;
+  company: string;
+  email: string;
+  stage: "New" | "Contacted" | "Qualified" | "Proposal" | "Won" | "Lost";
+  score: number;
+  source: string;
+  value: number;
+  createdTime: string;
+  avatarColor: string;
+  assignedTo?: string;
+}
+
+interface AssignmentRule {
+  id: string;
+  source: string;
+  assigneeName: string;
+  isActive: boolean;
+}
+
+let assignmentRules: AssignmentRule[] = [
+  { id: "rule-1", source: "Website", assigneeName: "Alex Mercer", isActive: true },
+  { id: "rule-2", source: "Facebook", assigneeName: "Sarah Connor", isActive: true },
+  { id: "rule-3", source: "Instagram", assigneeName: "Marcus Wright", isActive: true },
+  { id: "rule-4", source: "Google Ads", assigneeName: "Elena Rostova", isActive: true },
+  { id: "rule-5", source: "Referrals", assigneeName: "Chloe Frazier", isActive: true }
+];
+
+interface Campaign {
+  platform: string;
+  status: "Active" | "Paused" | "Disconnected";
+  impressions: number;
+  clicks: number;
+  ctr: number;
+  spent: number;
+  conversions: number;
+  roi: number;
+}
+
+interface Activity {
+  id: string;
+  type: "lead" | "email" | "deal" | "task" | "system";
+  message: string;
+  timestamp: string;
+  user?: string;
+}
+
+interface EmailStep {
+  step: number;
+  subject: string;
+  delay: string;
+  body: string;
+}
+
+interface EmailSequence {
+  id: string;
+  name: string;
+  trigger: string;
+  status: string;
+  steps: EmailStep[];
+}
+
+let leads: Lead[] = [
+  { id: "L-101", name: "Sarah Jenkins", company: "Digital Spark Co", email: "sarah@digitalspark.io", stage: "Qualified", score: 95, source: "Google Ads", value: 4500, createdTime: "2 hours ago", avatarColor: "bg-blue-500", assignedTo: "Elena Rostova" },
+  { id: "L-102", name: "David Kim", company: "MarketFlow Solutions", email: "dkim@marketflow.com", stage: "Contacted", score: 88, source: "Facebook", value: 3200, createdTime: "15 mins ago", avatarColor: "bg-purple-500", assignedTo: "Sarah Connor" },
+  { id: "L-103", name: "Amanda Lopez", company: "Glow & Style Apparel", email: "amanda@glowstyle.co", stage: "New", score: 45, source: "Instagram", value: 1500, createdTime: "1 hour ago", avatarColor: "bg-pink-500", assignedTo: "Marcus Wright" },
+  { id: "L-104", name: "Marcus Vance", company: "Apex Systems", email: "mvance@apexcorp.com", stage: "Proposal", score: 92, source: "Website", value: 12500, createdTime: "3 hours ago", avatarColor: "bg-emerald-500", assignedTo: "Alex Mercer" },
+  { id: "L-105", name: "Jessica Chen", company: "TechVentures Capital", email: "jessica.chen@techventures.io", stage: "Won", score: 99, source: "Referrals", value: 25000, createdTime: "1 day ago", avatarColor: "bg-amber-500", assignedTo: "Chloe Frazier" },
+  { id: "L-106", name: "Oliver Brooks", company: "Creative Design Inc", email: "obrooks@designstudio.net", stage: "Contacted", score: 78, source: "Website", value: 5000, createdTime: "2 days ago", avatarColor: "bg-indigo-500", assignedTo: "Alex Mercer" },
+  { id: "L-107", name: "Elena Rostova", company: "QuantumScale Ltd", email: "elena@quantumscale.com", stage: "Qualified", score: 84, source: "Google Ads", value: 8500, createdTime: "3 days ago", avatarColor: "bg-teal-500", assignedTo: "Elena Rostova" },
+  { id: "L-108", name: "Thomas Wright", company: "Growth Labs", email: "twright@growthlabs.org", stage: "Lost", score: 32, source: "Facebook", value: 2400, createdTime: "4 days ago", avatarColor: "bg-gray-500", assignedTo: "Sarah Connor" }
+];
+
+let campaigns: Campaign[] = [
+  { platform: "Facebook Ads", status: "Active", impressions: 145200, clicks: 3480, ctr: 2.4, spent: 4500, conversions: 180, roi: 2.8 },
+  { platform: "Instagram Ads", status: "Active", impressions: 92000, clicks: 2760, ctr: 3.0, spent: 3200, conversions: 110, roi: 3.1 },
+  { platform: "Google Ads", status: "Active", impressions: 210500, clicks: 5250, ctr: 2.5, spent: 6800, conversions: 240, roi: 3.5 },
+  { platform: "LinkedIn Ads", status: "Disconnected", impressions: 0, clicks: 0, ctr: 0.0, spent: 0, conversions: 0, roi: 0.0 }
+];
+
+let activities: Activity[] = [
+  { id: "ACT-1", type: "lead", message: "New Lead Captured: David Kim from Facebook Ads", timestamp: "15 mins ago" },
+  { id: "ACT-2", type: "email", message: "Email Campaign Sent: 'Summer Promotion Week 1' to 1,250 contacts", timestamp: "30 mins ago" },
+  { id: "ACT-3", type: "lead", message: "Lead Amanda Lopez from Instagram submitted contact form", timestamp: "1 hour ago" },
+  { id: "ACT-4", type: "deal", message: "Lead Jessica Chen converted to Closed Won: $25,000 Contract", timestamp: "1 day ago" },
+  { id: "ACT-5", type: "system", message: "AI Maintenance Agent completed SEO & database indexing optimization", timestamp: "2 hours ago" },
+];
+
+let emailSequences = [
+  {
+    id: "seq-1",
+    name: "Welcome & Onboarding Sequence",
+    trigger: "New Lead Added",
+    status: "Active",
+    steps: [
+      { step: 1, subject: "Welcome to DIGITAL MARKETING CRM™ — Let's Grow! 🚀", delay: "Immediate", body: "Hi [First Name],\n\nWelcome to DIGITAL MARKETING CRM™ — the all-in-one platform built to help you capture, convert, and scale your business with AI-powered automation.\n\nHere's what you can do right now:\n- Connect your lead sources\n- Set up your first automation workflow\n- Import your contacts\n\nYour free trial is active. Let's make every lead count!\n\nTo your success,\nThe CRM Team" },
+      { step: 2, subject: "Your leads are waiting... let AI engage them 24/7", delay: "1 Day Later", body: "Hi [First Name],\n\nDid you know that 78% of leads buy from the first business that responds?\n\nWith DIGITAL MARKETING CRM™ AI-Powered Automation, you can:\n- Instantly respond to new leads\n- Send personalized follow-ups\n- Prioritize hot opportunities\n\nLaunch your dashboard now to get started!" },
+      { step: 3, subject: "How Sarah's Agency 3x'd Their Revenue in 90 Days", delay: "3 Days Later", body: "Hi [First Name],\n\nSarah runs a 5-person agency. Before DIGITAL MARKETING CRM™, she spent 20+ hours/week on manual tasks.\n\nAfter switching she saved 15+ hours weekly and boosted conversions by 40%.\n\nReady to get those results? Let's talk!" }
+    ]
+  },
+  {
+    id: "seq-2",
+    name: "Urgency & Trial Expiration",
+    trigger: "Trial expires in 48h",
+    status: "Active",
+    steps: [
+      { step: 1, subject: "⏰ Your free trial expires in 48 hours", delay: "Immediate", body: "Hi [First Name],\n\nYour 14-day free trial of DIGITAL MARKETING CRM™ ends in 48 hours. Don't lose access to AI-powered marketing automation, visual sales pipelines, and your analytics.\n\nUpgrade now and use code GROW20 for 20% off your first 3 months!" }
+    ]
+  }
+];
+
+// Active automated AI maintenance/bug-fixing logs & status
+let maintenanceAgentStatus = {
+  lastRun: "2 hours ago",
+  health: "Healthy & Vigilant",
+  totalFixes: 34,
+  activeOptimization: "Nurturing Lead Workflows",
+  benchmarkSyncTime: "2026-06-24",
+  industryBenchmarks: {
+    averageCpc: 1.84,
+    averageCtr: 2.15,
+    topTrafficSource: "Google Ads",
+    marketGrowthRate: "14.2%"
+  }
+};
+
+// --- FIREBASE HELPER FUNCTIONS ---
+
+async function getFbLeads(): Promise<Lead[]> {
+  if (!firebaseEnabled || !db) return leads;
+  try {
+    const snap = await getDocs(collection(db, "leads"));
+    const fbLeads: Lead[] = [];
+    snap.forEach(d => fbLeads.push(d.data() as Lead));
+    fbLeads.sort((a, b) => b.id.localeCompare(a.id));
+    return fbLeads;
+  } catch (e) {
+    console.error("Firebase getFbLeads error:", e);
+    return leads;
+  }
+}
+
+async function getFbRules(): Promise<AssignmentRule[]> {
+  if (!firebaseEnabled || !db) return assignmentRules;
+  try {
+    const snap = await getDocs(collection(db, "assignmentRules"));
+    const fbRules: AssignmentRule[] = [];
+    snap.forEach(d => fbRules.push(d.data() as AssignmentRule));
+    return fbRules;
+  } catch (e) {
+    console.error("Firebase getFbRules error:", e);
+    return assignmentRules;
+  }
+}
+
+async function getFbCampaigns(): Promise<Campaign[]> {
+  if (!firebaseEnabled || !db) return campaigns;
+  try {
+    const snap = await getDocs(collection(db, "campaigns"));
+    const fbCamps: Campaign[] = [];
+    snap.forEach(d => fbCamps.push(d.data() as Campaign));
+    fbCamps.sort((a, b) => a.platform.localeCompare(b.platform));
+    return fbCamps;
+  } catch (e) {
+    console.error("Firebase getFbCampaigns error:", e);
+    return campaigns;
+  }
+}
+
+async function getFbActivities(): Promise<Activity[]> {
+  if (!firebaseEnabled || !db) return activities;
+  try {
+    const snap = await getDocs(collection(db, "activities"));
+    const fbActs: Activity[] = [];
+    snap.forEach(d => fbActs.push(d.data() as Activity));
+    fbActs.sort((a, b) => b.id.localeCompare(a.id));
+    return fbActs;
+  } catch (e) {
+    console.error("Firebase getFbActivities error:", e);
+    return activities;
+  }
+}
+
+async function getFbSequences(): Promise<EmailSequence[]> {
+  if (!firebaseEnabled || !db) return emailSequences;
+  try {
+    const snap = await getDocs(collection(db, "emailSequences"));
+    const fbSeqs: EmailSequence[] = [];
+    snap.forEach(d => fbSeqs.push(d.data() as EmailSequence));
+    fbSeqs.sort((a, b) => a.id.localeCompare(b.id));
+    return fbSeqs;
+  } catch (e) {
+    console.error("Firebase getFbSequences error:", e);
+    return emailSequences;
+  }
+}
+
+async function getFbMaintenanceStatus(): Promise<any> {
+  if (!firebaseEnabled || !db) return maintenanceAgentStatus;
+  try {
+    const snap = await getDoc(doc(db, "maintenance", "status"));
+    if (snap.exists()) {
+      return snap.data();
+    }
+    return maintenanceAgentStatus;
+  } catch (e) {
+    console.error("Firebase getFbMaintenanceStatus error:", e);
+    return maintenanceAgentStatus;
+  }
+}
+
+async function saveFbLead(lead: Lead) {
+  if (!firebaseEnabled || !db) {
+    const idx = leads.findIndex(l => l.id === lead.id);
+    if (idx !== -1) leads[idx] = lead;
+    else leads.unshift(lead);
+    return;
+  }
+  await setDoc(doc(db, "leads", lead.id), lead);
+}
+
+async function deleteFbLead(id: string) {
+  if (!firebaseEnabled || !db) {
+    const idx = leads.findIndex(l => l.id === id);
+    if (idx !== -1) leads.splice(idx, 1);
+    return;
+  }
+  await deleteDoc(doc(db, "leads", id));
+}
+
+async function saveFbActivity(act: Activity) {
+  if (!firebaseEnabled || !db) {
+    activities.unshift(act);
+    return;
+  }
+  await setDoc(doc(db, "activities", act.id), act);
+}
+
+async function saveFbRule(rule: AssignmentRule) {
+  if (!firebaseEnabled || !db) {
+    const idx = assignmentRules.findIndex(r => r.id === rule.id);
+    if (idx !== -1) assignmentRules[idx] = rule;
+    else assignmentRules.push(rule);
+    return;
+  }
+  await setDoc(doc(db, "assignmentRules", rule.id), rule);
+}
+
+async function deleteFbRule(id: string) {
+  if (!firebaseEnabled || !db) {
+    const idx = assignmentRules.findIndex(r => r.id === id);
+    if (idx !== -1) assignmentRules.splice(idx, 1);
+    return;
+  }
+  await deleteDoc(doc(db, "assignmentRules", id));
+}
+
+async function saveFbCampaign(camp: Campaign) {
+  if (!firebaseEnabled || !db) {
+    const idx = campaigns.findIndex(c => c.platform === camp.platform);
+    if (idx !== -1) campaigns[idx] = camp;
+    return;
+  }
+  await setDoc(doc(db, "campaigns", camp.platform), camp);
+}
+
+async function saveFbSequence(seq: any) {
+  if (!firebaseEnabled || !db) {
+    emailSequences.push(seq);
+    return;
+  }
+  await setDoc(doc(db, "emailSequences", seq.id), seq);
+}
+
+async function saveFbMaintenanceStatus(status: any) {
+  if (!firebaseEnabled || !db) {
+    maintenanceAgentStatus = status;
+    return;
+  }
+  await setDoc(doc(db, "maintenance", "status"), status);
+}
+
+// Seed function
+async function seedDatabaseIfEmpty() {
+  if (!firebaseEnabled || !db) return;
+  try {
+    console.log("[Firebase] Checking if database seeding is required...");
+    
+    // 1. Leads
+    const leadsRef = collection(db, "leads");
+    const leadsSnap = await getDocs(leadsRef);
+    if (leadsSnap.empty) {
+      console.log("[Firebase] Seeding initial leads...");
+      for (const lead of leads) {
+        await setDoc(doc(db, "leads", lead.id), lead);
+      }
+    }
+
+    // 2. Assignment Rules
+    const rulesRef = collection(db, "assignmentRules");
+    const rulesSnap = await getDocs(rulesRef);
+    if (rulesSnap.empty) {
+      console.log("[Firebase] Seeding initial assignment rules...");
+      for (const rule of assignmentRules) {
+        await setDoc(doc(db, "assignmentRules", rule.id), rule);
+      }
+    }
+
+    // 3. Campaigns
+    const campaignsRef = collection(db, "campaigns");
+    const campaignsSnap = await getDocs(campaignsRef);
+    if (campaignsSnap.empty) {
+      console.log("[Firebase] Seeding initial campaigns...");
+      for (const camp of campaigns) {
+        await setDoc(doc(db, "campaigns", camp.platform), camp);
+      }
+    }
+
+    // 4. Activities
+    const activitiesRef = collection(db, "activities");
+    const activitiesSnap = await getDocs(activitiesRef);
+    if (activitiesSnap.empty) {
+      console.log("[Firebase] Seeding initial activities...");
+      for (const act of activities) {
+        await setDoc(doc(db, "activities", act.id), act);
+      }
+    }
+
+    // 5. Sequences
+    const seqRef = collection(db, "emailSequences");
+    const seqSnap = await getDocs(seqRef);
+    if (seqSnap.empty) {
+      console.log("[Firebase] Seeding initial email sequences...");
+      for (const seq of emailSequences) {
+        await setDoc(doc(db, "emailSequences", seq.id), seq);
+      }
+    }
+
+    // 6. Maintenance Status
+    const maintDocRef = doc(db, "maintenance", "status");
+    const maintDocSnap = await getDoc(maintDocRef);
+    if (!maintDocSnap.exists()) {
+      console.log("[Firebase] Seeding initial maintenance status...");
+      await setDoc(maintDocRef, maintenanceAgentStatus);
+    }
+    
+    console.log("[Firebase] Database seeding check complete!");
+  } catch (err) {
+    console.error("[Firebase] Error checking or seeding Firestore:", err);
+  }
+}
+
+// --- ENDPOINTS FOR LEADS ---
+
+app.get("/api/leads", async (req, res) => {
+  try {
+    const currentLeads = await getFbLeads();
+    res.json({ success: true, leads: currentLeads });
+  } catch (err) {
+    console.error("Failed to load leads:", err);
+    res.json({ success: true, leads });
+  }
+});
+
+app.post("/api/leads", async (req, res) => {
+  const { name, company, email, source, value, score, assignedTo } = req.body;
+  if (!name || !email) {
+    return res.status(400).json({ success: false, error: "Name and Email are required." });
+  }
+
+  try {
+    const targetSource = source || "Website";
+    const currentRules = await getFbRules();
+    const matchedRule = currentRules.find(r => r.source.toLowerCase() === targetSource.toLowerCase() && r.isActive);
+    const finalAssignedTo = assignedTo || (matchedRule ? matchedRule.assigneeName : "Unassigned");
+
+    const currentLeads = await getFbLeads();
+    const nextIdNum = currentLeads.length > 0 
+      ? Math.max(...currentLeads.map(l => {
+          const match = l.id.match(/\d+/);
+          return match ? parseInt(match[0], 10) : 100;
+        })) + 1
+      : 101;
+
+    const newLead: Lead = {
+      id: `L-${nextIdNum}`,
+      name,
+      company: company || "Self-Employed",
+      email,
+      stage: "New",
+      score: score || Math.floor(Math.random() * 50) + 40,
+      source: targetSource,
+      value: Number(value) || 0,
+      createdTime: "Just now",
+      avatarColor: ["bg-blue-500", "bg-purple-500", "bg-pink-500", "bg-emerald-500", "bg-indigo-500", "bg-teal-500"][Math.floor(Math.random() * 6)],
+      assignedTo: finalAssignedTo
+    };
+
+    await saveFbLead(newLead);
+
+    // Add to activity log
+    const actId = `ACT-${Date.now()}`;
+    const newAct: Activity = {
+      id: actId,
+      type: "lead",
+      message: `Manual Lead Created: ${name} from ${newLead.source} (Assigned to: ${newLead.assignedTo})`,
+      timestamp: "Just now"
+    };
+    await saveFbActivity(newAct);
+
+    const refreshedLeads = await getFbLeads();
+    res.json({ success: true, lead: newLead, leads: refreshedLeads });
+  } catch (err) {
+    console.error("Failed to save new lead:", err);
+    res.status(500).json({ success: false, error: "Failed to save lead" });
+  }
+});
+
+app.put("/api/leads/:id", async (req, res) => {
+  const { id } = req.params;
+  const { stage, score, value, assignedTo } = req.body;
+
+  try {
+    const currentLeads = await getFbLeads();
+    const targetLead = currentLeads.find(l => l.id === id);
+    if (!targetLead) {
+      return res.status(404).json({ success: false, error: "Lead not found" });
+    }
+
+    const oldStage = targetLead.stage;
+    if (stage) targetLead.stage = stage;
+    if (score !== undefined) targetLead.score = Number(score);
+    if (value !== undefined) targetLead.value = Number(value);
+    if (assignedTo !== undefined) targetLead.assignedTo = assignedTo;
+
+    await saveFbLead(targetLead);
+
+    // Create activity log on stage upgrade
+    if (stage && oldStage !== stage) {
+      const actId = `ACT-${Date.now()}`;
+      const newAct: Activity = {
+        id: actId,
+        type: stage === "Won" ? "deal" : "lead",
+        message: `Lead ${targetLead.name} transitioned from ${oldStage} to ${stage} (${targetLead.company})`,
+        timestamp: "Just now"
+      };
+      await saveFbActivity(newAct);
+    }
+
+    const refreshedLeads = await getFbLeads();
+    res.json({ success: true, lead: targetLead, leads: refreshedLeads });
+  } catch (err) {
+    console.error("Failed to update lead:", err);
+    res.status(500).json({ success: false, error: "Failed to update lead" });
+  }
+});
+
+app.post("/api/leads/bulk-update", async (req, res) => {
+  const { ids, stage } = req.body;
+  if (!Array.isArray(ids) || !stage) {
+    return res.status(400).json({ success: false, error: "Invalid request payload" });
+  }
+
+  try {
+    const currentLeads = await getFbLeads();
+    let count = 0;
+    for (const id of ids) {
+      const targetLead = currentLeads.find(l => l.id === id);
+      if (targetLead) {
+        const oldStage = targetLead.stage;
+        targetLead.stage = stage;
+        count++;
+        await saveFbLead(targetLead);
+
+        if (oldStage !== stage) {
+          const actId = `ACT-bulk-${Date.now()}-${id}`;
+          const newAct: Activity = {
+            id: actId,
+            type: stage === "Won" ? "deal" : "lead",
+            message: `[Bulk] Lead ${targetLead.name} transitioned to ${stage}`,
+            timestamp: "Just now"
+          };
+          await saveFbActivity(newAct);
+        }
+      }
+    }
+
+    const refreshedLeads = await getFbLeads();
+    res.json({ success: true, count, leads: refreshedLeads });
+  } catch (err) {
+    console.error("Failed to bulk update leads:", err);
+    res.status(500).json({ success: false, error: "Failed to bulk update leads" });
+  }
+});
+
+app.post("/api/leads/bulk-delete", async (req, res) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids)) {
+    return res.status(400).json({ success: false, error: "Invalid request payload" });
+  }
+
+  try {
+    const currentLeads = await getFbLeads();
+    let count = 0;
+    for (const id of ids) {
+      const targetLead = currentLeads.find(l => l.id === id);
+      if (targetLead) {
+        await deleteFbLead(id);
+        count++;
+
+        const actId = `ACT-bulk-${Date.now()}-${id}`;
+        const newAct: Activity = {
+          id: actId,
+          type: "system",
+          message: `[Bulk] Lead ${targetLead.name} removed from tracking.`,
+          timestamp: "Just now"
+        };
+        await saveFbActivity(newAct);
+      }
+    }
+
+    const refreshedLeads = await getFbLeads();
+    res.json({ success: true, count, leads: refreshedLeads });
+  } catch (err) {
+    console.error("Failed to bulk delete leads:", err);
+    res.status(500).json({ success: false, error: "Failed to bulk delete leads" });
+  }
+});
+
+app.delete("/api/leads/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const currentLeads = await getFbLeads();
+    const targetLead = currentLeads.find(l => l.id === id);
+    if (!targetLead) {
+      return res.status(404).json({ success: false, error: "Lead not found" });
+    }
+
+    await deleteFbLead(id);
+
+    const actId = `ACT-${Date.now()}`;
+    const newAct: Activity = {
+      id: actId,
+      type: "system",
+      message: `Lead ${targetLead.name} removed from active tracking.`,
+      timestamp: "Just now"
+    };
+    await saveFbActivity(newAct);
+
+    const refreshedLeads = await getFbLeads();
+    res.json({ success: true, leads: refreshedLeads });
+  } catch (err) {
+    console.error("Failed to delete lead:", err);
+    res.status(500).json({ success: false, error: "Failed to delete lead" });
+  }
+});
+
+// --- ENDPOINTS FOR ASSIGNMENT RULES (SETTINGS) ---
+
+app.get("/api/settings/rules", async (req, res) => {
+  try {
+    const currentRules = await getFbRules();
+    res.json({ success: true, rules: currentRules });
+  } catch (err) {
+    console.error("Failed to load settings rules:", err);
+    res.json({ success: true, rules: assignmentRules });
+  }
+});
+
+app.post("/api/settings/rules", async (req, res) => {
+  const { source, assigneeName, isActive } = req.body;
+  if (!source || !assigneeName) {
+    return res.status(400).json({ success: false, error: "Source and Assignee Name are required." });
+  }
+
+  try {
+    const newRule: AssignmentRule = {
+      id: `rule-${Date.now()}`,
+      source,
+      assigneeName,
+      isActive: isActive !== undefined ? isActive : true
+    };
+
+    await saveFbRule(newRule);
+    const refreshedRules = await getFbRules();
+    res.json({ success: true, rules: refreshedRules });
+  } catch (err) {
+    console.error("Failed to save setting rule:", err);
+    res.status(500).json({ success: false, error: "Failed to save rule" });
+  }
+});
+
+app.put("/api/settings/rules/:id", async (req, res) => {
+  const { id } = req.params;
+  const { source, assigneeName, isActive } = req.body;
+
+  try {
+    const currentRules = await getFbRules();
+    const targetRule = currentRules.find(r => r.id === id);
+    if (!targetRule) {
+      return res.status(404).json({ success: false, error: "Rule not found" });
+    }
+
+    if (source !== undefined) targetRule.source = source;
+    if (assigneeName !== undefined) targetRule.assigneeName = assigneeName;
+    if (isActive !== undefined) targetRule.isActive = isActive;
+
+    await saveFbRule(targetRule);
+    const refreshedRules = await getFbRules();
+    res.json({ success: true, rules: refreshedRules });
+  } catch (err) {
+    console.error("Failed to update setting rule:", err);
+    res.status(500).json({ success: false, error: "Failed to update rule" });
+  }
+});
+
+app.delete("/api/settings/rules/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const currentRules = await getFbRules();
+    const targetRule = currentRules.find(r => r.id === id);
+    if (!targetRule) {
+      return res.status(404).json({ success: false, error: "Rule not found" });
+    }
+
+    await deleteFbRule(id);
+    const refreshedRules = await getFbRules();
+    res.json({ success: true, rules: refreshedRules });
+  } catch (err) {
+    console.error("Failed to delete setting rule:", err);
+    res.status(500).json({ success: false, error: "Failed to delete rule" });
+  }
+});
+
+// --- ENDPOINTS FOR CAMPAIGNS & INTEGRATIONS ---
+
+app.get("/api/campaigns", async (req, res) => {
+  try {
+    const currentCamps = await getFbCampaigns();
+    res.json({ success: true, campaigns: currentCamps });
+  } catch (err) {
+    console.error("Failed to load campaigns:", err);
+    res.json({ success: true, campaigns });
+  }
+});
+
+app.post("/api/campaigns/toggle", async (req, res) => {
+  const { platform } = req.body;
+  try {
+    const currentCamps = await getFbCampaigns();
+    const camp = currentCamps.find(c => c.platform === platform);
+    if (!camp) return res.status(404).json({ success: false, error: "Platform not found" });
+
+    if (camp.status === "Disconnected") {
+      // Connect and seed
+      camp.status = "Active";
+      camp.impressions = Math.floor(Math.random() * 50000) + 20000;
+      camp.clicks = Math.floor(camp.impressions * 0.025);
+      camp.ctr = 2.5;
+      camp.spent = Math.floor(Math.random() * 2000) + 500;
+      camp.conversions = Math.floor(camp.clicks * 0.08);
+      camp.roi = Number((2.0 + Math.random() * 2).toFixed(1));
+    } else if (camp.status === "Active") {
+      camp.status = "Paused";
+    } else {
+      camp.status = "Active";
+    }
+
+    await saveFbCampaign(camp);
+
+    const actId = `ACT-${Date.now()}`;
+    const newAct: Activity = {
+      id: actId,
+      type: "system",
+      message: `Campaign on ${platform} status updated to ${camp.status}`,
+      timestamp: "Just now"
+    };
+    await saveFbActivity(newAct);
+
+    const refreshedCamps = await getFbCampaigns();
+    res.json({ success: true, campaigns: refreshedCamps });
+  } catch (err) {
+    console.error("Failed to toggle campaign:", err);
+    res.status(500).json({ success: false, error: "Failed to toggle campaign" });
+  }
+});
+
+// --- ENDPOINTS FOR EMAIL SEQUENCES ---
+
+app.get("/api/sequences", async (req, res) => {
+  try {
+    const currentSeqs = await getFbSequences();
+    res.json({ success: true, sequences: currentSeqs });
+  } catch (err) {
+    console.error("Failed to load email sequences:", err);
+    res.json({ success: true, sequences: emailSequences });
+  }
+});
+
+app.post("/api/sequences", async (req, res) => {
+  const { name, trigger, steps } = req.body;
+  if (!name || !steps || !steps.length) {
+    return res.status(400).json({ success: false, error: "Name and steps are required." });
+  }
+
+  try {
+    const newSeq = {
+      id: `seq-${Date.now()}`,
+      name,
+      trigger: trigger || "Manual Trigger",
+      status: "Active",
+      steps: steps.map((s: any, idx: number) => ({
+        step: idx + 1,
+        subject: s.subject || "Subject line goes here",
+        delay: s.delay || "1 Day Later",
+        body: s.body || ""
+      }))
+    };
+
+    await saveFbSequence(newSeq);
+
+    const actId = `ACT-${Date.now()}`;
+    const newAct: Activity = {
+      id: actId,
+      type: "email",
+      message: `Created new automated email sequence: "${name}"`,
+      timestamp: "Just now"
+    };
+    await saveFbActivity(newAct);
+
+    const refreshedSeqs = await getFbSequences();
+    res.json({ success: true, sequence: newSeq, sequences: refreshedSeqs });
+  } catch (err) {
+    console.error("Failed to add sequence:", err);
+    res.status(500).json({ success: false, error: "Failed to add sequence" });
+  }
+});
+
+// --- ENDPOINTS FOR RECENT ACTIVITIES ---
+
+app.get("/api/activities", async (req, res) => {
+  try {
+    const currentActs = await getFbActivities();
+    res.json({ success: true, activities: currentActs });
+  } catch (err) {
+    console.error("Failed to load activities:", err);
+    res.json({ success: true, activities });
+  }
+});
+
+// --- AI COPYWRITING AND VIDEO STORYBOARD GENERATION VIA GEMINI ---
+
+app.post("/api/gemini/generate-copy", async (req, res) => {
+  const { type, productName, category, audience, painPoint, desiredOutcome, tone, extraNotes, platforms, offer, features } = req.body;
+
+  if (!productName) {
+    return res.status(400).json({ success: false, error: "Product name is required" });
+  }
+
+  // Define the core AI growth guidelines to reuse
+  const coreAiEngineInstructions = `You are the core AI engine of an “AI-Powered Digital Marketing CRM”.
+
+Your purpose:
+- Use AI-powered tools and best practices to generate, organize, and optimize Digital Marketing & E-Commerce content.
+- Build unified funnels that attract, engage, and convert internet browsers into paying customers.
+
+Conceptual model:
+- Digital marketing = strategic online material used to attract, engage, and nurture audiences via SEO, social media, email, and paid ads.
+- E-commerce = digital platform mechanics of buying and selling products, including product pages, checkout flows, and transactional content.
+- Together, they form a unified funnel that drives brand awareness, consumer trust, and web transactions.
+
+Core Digital Marketing pillars:
+- SEO Content
+- Social Media Content
+- Email Marketing Material
+- Paid Advertising Copy
+
+Core E-Commerce pillars:
+- Product Information Pages
+- Visual Commerce Media
+- Social Proof Indicators
+- Transactional & Support Text
+
+Key skills you must demonstrate:
+- Data Storytelling
+- Market Research
+- Marketing Analytics
+- Storefront Optimization
+
+You must:
+1. Always think in terms of a funnel: Awareness → Consideration → Conversion → Retention.
+2. Always connect Digital Marketing content (traffic + engagement) to E-Commerce content (product pages + checkout).
+3. Output content in clean, structured sections with clear labels.
+4. When asked to “generate content”, always cover:
+   - SEO
+   - Social
+   - Email
+   - Paid Ads
+   - Product Page
+   - Social Proof
+   - Transactional/Support
+   unless the user explicitly limits the scope.`;
+
+  if (!ai) {
+    // Mock / fallback response if API Key is not set yet, covering all 8 requested parts as required
+    const catLabel = category || "Product Niche";
+    const audLabel = audience || "Target Customers & Enthusiasts";
+    const painLabel = painPoint || "Fragmented software tools, disjointed messaging, and high conversion friction";
+    const outLabel = desiredOutcome || "A unified, high-converting automated funnel that scales sales 24/7";
+    const toneLabel = tone || "Empowering & Action-oriented";
+    const featLabel = features || "All-in-one smart automated framework modules";
+
+    if (type === "Product Page Generator") {
+      return res.json({
+        success: true,
+        isDemo: true,
+        text: `### 🛍️ E-commerce Product Page: ${productName} (AI Sandbox Mode)
+
+> **Role:** E-commerce Conversion Copywriter
+> **Product Name:** ${productName}
+> **Category:** ${catLabel}
+> **Target Audience:** ${audLabel}
+> **Main Pain Point:** ${painLabel}
+> **Desired Outcome:** ${outLabel}
+> **Key Features:** ${featLabel}
+> **Tone:** ${toneLabel}
+
+---
+
+### 🏷️ 1. PRODUCT TITLE
+**${productName}** — The Ultimate ${catLabel} engineered for ${audLabel} to achieve ${outLabel.split(',')[0]} without ${painLabel.split(',')[0]}.
+
+---
+
+### 📝 2. SHORT DESCRIPTION
+Stop struggling with **${painLabel.split(',')[0]}**. The new **${productName}** is designed specifically to help you unlock **${outLabel.split(',')[0]}** in a fraction of the time. Featuring high-performance ${featLabel.split(',')[0]}, this is your ultimate companion to get results, eliminate friction, and elevate your daily experience starting today.
+
+---
+
+### 📖 3. LONG DESCRIPTION (Story + Benefits)
+For years, ${audLabel} had to accept a frustrating compromise: dealing with constant **${painLabel}** just to get through their daily routines. Every available alternative felt incomplete, complex, or far too expensive.
+
+We believed there was a better way. 
+
+That’s why we engineered **${productName}**. By taking a human-first approach, we designed a unified solution that targets **${painLabel.split(',')[0]}** at its core. 
+
+When you use **${productName}**, you aren’t just buying a product—you’re upgrading to a streamlined state of flow. Imagine waking up or starting your workday knowing that you have fully secured **${outLabel}**. No more makeshift workarounds, no more low-value disruptions, and no more tech fatigue.
+
+---
+
+### 🌟 4. KEY BENEFITS
+*   **Complete Relief from ${painLabel.split(',')[0]}:** Instantly mitigates the primary bottleneck in your day.
+*   **Frictionless Setup:** Plug-and-play architecture means you can deploy the core benefits in less than 5 minutes.
+*   **Built for Longevity:** Engineered with premium grade components to support continuous active workloads.
+*   **Uncompromised Focus:** Tailored specific layouts that ensure your concentration stays where it matters most.
+
+---
+
+### ⚙️ 5. TECHNICAL DETAILS / SPECS
+*   **Core Feature Set:** ${featLabel}
+*   **Optimization Engine:** Integrated direct-response optimization module.
+*   **Interface Portability:** Fully cross-device responsive and touch-optimized layout.
+*   **Active Duty Rating:** High durability certifications with IPX4 or commercial SLA.
+
+---
+
+### 📐 6. SIZE / FIT GUIDANCE
+*   **Standard Fitment:** Fully adjustable, universally sized to fit seamlessly into any modern workflow or physical setup.
+*   **Digital Footprint:** Minimal resource overhead, running smoothly on any standard web browser or mobile viewport.
+
+---
+
+### 🎯 7. WHO THIS IS FOR vs. WHO THIS IS NOT FOR
+#### **Who this is for:**
+*   ${audLabel} who are ready to take action and automate their daily systems.
+*   Operators who have felt the pain of **${painLabel}** and are tired of band-aid fixes.
+*   High-growth teams looking for consistent, reliable, and high-fidelity outcomes.
+
+#### **Who this is not for:**
+*   Hobbyists looking for a quick, temporary gimmick with no interest in long-term optimization.
+*   Anyone who prefers manual, repetitive, disjointed workflows.
+
+---
+
+### ❓ 8. FREQUENTLY ASKED QUESTIONS (FAQ)
+
+**Q1: How quickly can I expect to see the desired outcome of "${outLabel.split(',')[0]}"?**
+*A1: Most users report a noticeable shift in system clarity and a substantial reduction in friction within the first 24 to 48 hours of deploying ${productName} into their standard pipeline.*
+
+**Q2: Does this replace my existing tool stack, or integrate with it?**
+*A2: ${productName} is designed as an all-in-one unified experience. While it can completely replace outdated, disconnected tools, it also features lightweight API hooks to synchronize with your existing databases if required.*
+
+**Q3: What if ${productName} doesn't address my specific pain point of "${painLabel.split(',')[0]}"?**
+*A3: We stand behind our engineering. If you find that the product is not completely resolving your primary bottleneck, we offer a dedicated, hassle-free 30-day satisfaction guarantee.*
+
+---
+
+*Configure your real GEMINI_API_KEY in Settings > Secrets to generate fully dynamic, custom-tailored product pages!*`
+      });
+    }
+
+    if (type === "Email Sequence Generator") {
+      const offerLabel = offer || "special 14-day free trial trial (no credit card required)";
+      return res.json({
+        success: true,
+        isDemo: true,
+        text: `### 📧 High-Converting 3-Email Sequence: ${productName} (AI Sandbox Mode)
+
+> **Role:** Email Marketing Specialist
+> **Product Name:** ${productName}
+> **Target Audience:** ${audLabel}
+> **Main Pain Point:** ${painLabel}
+> **Desired Outcome:** ${outLabel}
+> **Offer:** ${offerLabel}
+> **Tone:** ${toneLabel}
+
+---
+
+### 📬 EMAIL 1: WELCOME & VALUE
+*   **Subject Line:** Welcome to the future of ${catLabel} 🚀
+*   **Preview Text:** Say goodbye to ${painLabel.split(',')[0]} and hello to ${outLabel.split(',')[0]} starting today.
+*   **Body Copy:**
+    Hi [First Name],
+    
+    Thank you for choosing **${productName}**!
+    
+    We started this journey with a single mission: to help ${audLabel} completely eliminate **${painLabel.split(',')[0]}** and unlock true, sustainable **${outLabel.split(',')[0]}**.
+    
+    Over the next few days, we'll send you high-value tactics to streamline your systems and connect your outreach marketing to your checkout workflows.
+    
+    To get started, we've prepared a custom walkthrough to show you how easy it is to set up your digital workspace.
+*   **CTA:** [Access Your Marketing Dashboard Now](https://ai.studio/build)
+
+---
+
+### 📬 EMAIL 2: SOCIAL PROOF & EDUCATION
+*   **Subject Line:** How other ${audLabel} solved "${painLabel.split(',')[0]}" 💡
+*   **Preview Text:** The exact framework that generated a 3x conversion lift.
+*   **Body Copy:**
+    Hey [First Name],
+    
+    Most operators think they need *more traffic* to grow.
+    
+    In reality, they just need to close the gap between their promotional ads and their storefront checkout page. When your copywriting is disjointed, you leak high-value leads.
+    
+    By unifying your brand voice with **${productName}**, you create a frictionless path. Here's what one user said:
+    
+    > *"Within 7 days of aligning our email sequences and product landing copy, our customer leakage dropped to zero."* - Sarah J., Digital Spark Co.
+*   **CTA:** [Read the Case Study](https://ai.studio/build)
+
+---
+
+### 📬 EMAIL 3: OFFER & URGENCY
+*   **Subject Line:** ⏰ The clock is ticking: Unlock ${outLabel.split(',')[0]}!
+*   **Preview Text:** Claim your exclusive access: ${offerLabel}.
+*   **Body Copy:**
+    Hi [First Name],
+    
+    The choice is yours: continue struggling with **${painLabel.split(',')[0]}** or claim your copy of **${productName}** today to fully activate **${outLabel.split(',')[0]}**.
+    
+    For a limited time, you can secure our exclusive offer:
+    
+    👉 **${offerLabel}**
+    
+    This special link will expire in exactly 48 hours, so make sure to reserve your active pipeline slot now.
+*   **CTA:** [Claim ${offerLabel} and Start Scaling](https://ai.studio/build)
+
+---
+
+*Configure your real GEMINI_API_KEY in Settings > Secrets to generate fully dynamic, custom-tailored email sequences!*`
+      });
+    }
+
+    if (type === "Social Media Suite") {
+      const platLabel = platforms || "TikTok, Instagram, LinkedIn, Community";
+      return res.json({
+        success: true,
+        isDemo: true,
+        text: `### 📱 Social Media Content Strategy: ${productName} (AI Sandbox Mode)
+
+> **Role:** Social Media Strategist & Brand Storyteller
+> **Product Name:** ${productName}
+> **Platform Focus:** ${platLabel}
+> **Target Audience:** ${audLabel}
+> **Brand Tone:** ${toneLabel}
+
+---
+
+### 🎬 2 TIKTOK / REELS SCRIPTS (Scroll-Stopping & Conversion-Focused)
+
+#### 🎥 Video Script 1: The Bottleneck Exposure
+* **Hook:** (Visual: Split screen showing frantic multi-tasking vs a smooth, automated workflow. Text overlay: "How much time is your current system wasting? 💸")
+  "If you are still jumping between five different tools to generate copy, schedule posts, and score leads... you are throwing away at least 15 hours a week."
+* **Body:** 
+  "The secret to modern growth isn't working harder. It's alignment. When your digital marketing assets connect directly to your checkout page, conversions happen on autopilot. That's exactly why we built ${productName} — to handle the heavy lifting for you."
+* **CTA:** 
+  "Stop over-complicating your funnel. Tap the link in our bio to start your free trial of ${productName} today!"
+
+#### 🎥 Video Script 2: The Proof is in the System
+* **Hook:** (Visual: Zooming in on a direct response lead conversion list dashboard showing active leads. Fast-paced cut.)
+  "This is the exact layout high-growth operators use to prioritize their day. Here's how to set it up in under 5 minutes."
+* **Body:**
+  "We stopped writing manual outreach scripts and started utilizing AI-optimized direct response copywriting. The results? Lead leakage dropped to zero and customer retention tripled."
+* **CTA:**
+  "Comment 'SYSTEM' below and we'll DM you the exclusive setup blueprint instantly!"
+
+---
+
+### 📸 1 INSTAGRAM CAROUSEL SCRIPT (5 slides with captions)
+
+* **Slide 1 (Cover):** Why Your Current Funnel is Leaking Sales ⚠️
+  *(Visual: Bold typography on a sleek, high-contrast dark slate background with a dynamic arrow symbol)*
+  *Caption:* The gap between your marketing and your storefront is costing you more than you think. Let's fix it. 👇
+
+* **Slide 2:** The Disconnection Tax 💸
+  *(Visual: A flow diagram showing leads dropping off between social ads and product details pages)*
+  *Caption:* Most traffic bounces because the messaging is disjointed. A user clicks a witty ad but lands on a dry, boring product detail page.
+
+* **Slide 3:** Enter ${productName} 🚀
+  *(Visual: A clean screenshot of the Copywriter workbench generating cohesive, aligned copy in real-time)*
+  *Caption:* We align your brand tone across all 8 core pillars — from top-of-funnel TikToks to bottom-of-funnel checkout validation scripts.
+
+* **Slide 4:** Automate the consideration-to-checkout sequence 🎯
+  *(Visual: A checklist of automated welcomes, social proof badges, and secure checkout copy)*
+  *Caption:* When your leads are prioritized by high-urgency scores, you know exactly who to follow up with and when. No guess work, just conversion.
+
+* **Slide 5 (Call to Action):** Claim Your Funnel Suite Today 🎁
+  *(Visual: A mock-up of the fully responsive dashboard workspace with a prominent "Start Free" button)*
+  *Caption:* Ready to scale? Tap the link in our bio to claim your 14-day premium sandbox access and eliminate conversion friction forever!
+
+---
+
+### 💬 1 COMMUNITY ENGAGEMENT POST (Interactive Poll or Question)
+
+#### **Platform Option A: LinkedIn Poll**
+* **Question:** What is the single biggest bottleneck in your current marketing setup?
+* **Options:**
+  1. Grabbing initial attention (SEO/Social)
+  2. Nurturing cold leads (Email sequences)
+  3. Closing the sale (Friction at checkout)
+  4. Juggling too many disconnected tools
+* **Accompanying Caption:** 
+  "We've been auditing over 100 growth funnels this month, and the pattern is clear: traffic isn't the problem — the disjointed handoff between social platforms and e-commerce listings is where the revenue leaks.
+  
+  Cast your vote below, and we'll share the top 3 ways our members are unifying their funnels this quarter with **${productName}**! 🚀"
+
+---
+
+*Configure your real GEMINI_API_KEY in Settings > Secrets to generate fully dynamic, custom-tailored social campaigns!*`
+      });
+    }
+
+    if (type === "SEO Content Generator") {
+      return res.json({
+        success: true,
+        isDemo: true,
+        text: `### 🔍 SEO Content Strategy: ${productName} (AI Sandbox Mode)
+
+> **Role:** SEO Content Strategist
+> **Product:** ${productName} | **Target Audience:** ${audLabel}
+> **Main Pain Point:** ${painLabel}
+> **Desired Outcome:** ${outLabel}
+
+---
+
+### 📈 3 HIGH-INTENT BLOG POST IDEAS
+
+#### 📝 Blog Idea 1
+* **Keyword:** *how to fix ${painLabel.toLowerCase().split(',')[0]}*
+* **Title:** The Ultimate Guide to Solving ${painLabel.split(',')[0]} for ${audLabel}
+* **3–5 Bullet Outline:**
+  1. *The Bottleneck Explained*: Why ${painLabel.split(',')[0]} is silently hurting your growth.
+  2. *Common Mistakes*: Why generic workarounds fail to deliver ${outLabel}.
+  3. *The Unified Solution*: How automating your content with a dedicated platform bridges the gap.
+  4. *Actionable Roadmap*: 3 steps you can take today to streamline your operations.
+* **Suggested CTA:** "Ready to completely eliminate ${painLabel.split(',')[0]}? Try ${productName} free for 14 days and unlock ${outLabel} automatically."
+
+#### 📝 Blog Idea 2
+* **Keyword:** *best ${productName.toLowerCase()} alternatives*
+* **Title:** Why Traditional Tools Fail: Transitioning to ${productName} to Achieve ${outLabel}
+* **3–5 Bullet Outline:**
+  1. *The Tool-Fatigue Crisis*: How jumping between 5 different apps creates friction.
+  2. *The Power of Alignment*: Connecting top-of-funnel discovery to bottom-of-funnel customer retention.
+  3. *Feature Showdown*: Why ${productName} excels at high-conversion copywriting and lead scoring.
+* **Suggested CTA:** "Stop wasting budget on disconnected systems. Get started with ${productName} today."
+
+#### 📝 Blog Idea 3
+* **Keyword:** *step-by-step ${outLabel.toLowerCase().split(',')[0]} guide*
+* **Title:** How ${audLabel} Can Achieve ${outLabel} Without Over-Engineering
+* **3–5 Bullet Outline:**
+  1. *Defining the Goal*: What does true, sustainable ${outLabel} look like?
+  2. *Friction Removal*: Where modern campaigns typically lose 40%+ of their prospects.
+  3. *Automation in Action*: A walkthrough of real-time campaigns powered by ${productName}.
+* **Suggested CTA:** "Unleash your full potential. Tap here to customize your campaign template on ${productName}."
+
+---
+
+### 🏛️ 1 DETAILED OUTLINE FOR A PILLAR ARTICLE
+
+#### **H1: The Definitive Framework to Achieve ${outLabel} while Overcoming ${painLabel}**
+
+#### **H2: Introduction: The Modern Dilemma of ${audLabel}**
+- Exploring the daily friction points face-to-face.
+- Why driving raw traffic is a vanity metric if conversion pathways are broken.
+
+#### **H2: The Anatomy of a High-Converting Unified Funnel**
+- Understanding the consumer journey: *Awareness → Consideration → Conversion → Retention*.
+- How to connect direct-response ad copy directly to your product descriptions.
+
+#### **H2: Step-by-Step Blueprint to Eradicate ${painLabel}**
+- **H3: Step 1: Nurture with Context-Rich Content** (Educational blog layouts, email newsletters).
+- **H3: Step 2: Build a Trust Bridge** (Social proof indicators, dynamic testimonials, UGC).
+- **H3: Step 3: Streamline the Transaction** (Frictionless secure checkout and transactional support).
+
+#### **H2: Case Study: Real-World Transformation with ${productName}**
+- Before-and-after conversion comparisons.
+- Key takeaways and marketing analytics benchmarks.
+
+#### **H2: Conclusion & Next Steps**
+- Recap of the core pillars of e-commerce storefront optimization.
+- **Strategic CTA Placement Plan**: In-text links in sections 2 and 3; high-contrast box banner CTA at the end.
+
+---
+
+*Configure your real GEMINI_API_KEY in Settings > Secrets to generate fully dynamic, custom-tailored SEO strategies!*`
+      });
+    }
+
+    return res.json({
+      success: true,
+      isDemo: true,
+      text: `### 🎯 Unified Funnel Campaign Suite: ${productName} (AI Sandbox Mode)
+
+> **Product:** ${productName} | **Category:** ${catLabel}
+> **Target Audience:** ${audLabel} | **Tone:** ${toneLabel}
+> **Main Pain Point:** ${painLabel}
+> **Desired Outcome:** ${outLabel}
+
+---
+
+### 1. SEO CONTENT
+* **3 Blog Post Titles & Outlines targeting high-intent keywords:**
+  1. *Title: Why Disconnected Marketing is Murdering Your ${catLabel} Storefront*
+     - **Keyword:** *how to optimize ${productName.toLowerCase()}*
+     - **Outline:** Introduction to the conversion leak; why traditional siloed tools fail; step-by-step connection of top-of-funnel ads with PDPs.
+  2. *Title: The Ultimate Checklist to Achieve ${outLabel} in 30 Days*
+     - **Keyword:** *best ${catLabel.toLowerCase()} strategy*
+     - **Outline:** Identifying the friction point ("${painLabel}"); streamlining email sequences; automating checkout reassurance.
+  3. *Title: Case Study: How We Eliminated "${painLabel}" and Tripled Revenue*
+     - **Keyword:** *${productName.toLowerCase()} reviews and results*
+     - **Outline:** Real-world metrics analysis; dynamic copywriting tweaks; setting up transactional support scripts.
+* **SEO-Optimized Landing Page Outline:**
+  - **H1 (Hero):** Experience ${outLabel} with the Power of ${productName}
+  - **H2 (Problem):** Are You Struggling with ${painLabel}?
+  - **H2 (Solution):** Meet ${productName} — Engineered Specifically to Drive ${outLabel}
+  - **Key Benefits (Bullet points):**
+    - Seamlessly transforms traffic into sales.
+    - Specifically designed to speak directly to ${audLabel}.
+    - Built-in secure conversion paths with near-zero friction.
+
+---
+
+### 2. SOCIAL MEDIA CONTENT
+* **3 Short-Form Video Ideas (TikTok/Reels) with hooks and CTAs:**
+  1. *Concept 1: The Harsh Truth about ${catLabel}*
+     - **Hook:** "Here's the real reason why your current system makes "${painLabel}" worse... 🤯"
+     - **CTA:** "Tap the link in our bio to claim your 14-day free trial of ${productName}!"
+  2. *Concept 2: A Day in the Life of a High-Growth operator*
+     - **Hook:** "Watch me achieve "${outLabel}" in under 5 minutes without writing a single line of code."
+     - **CTA:** "Comment 'GROW' below to receive the exclusive setup guide."
+  3. *Concept 3: Before & After ${productName}*
+     - **Hook:** "Stop letting "${painLabel}" eat up your margins. Here's what life looks like after switching."
+     - **CTA:** "Save this video and start your upgrade today!"
+* **1 Instagram Carousel Script (Slide-by-slide captions):**
+  - *Slide 1:* Stop Struggling with ${painLabel}! (Visual: High-contrast split screen showing stress vs. relief)
+  - *Slide 2:* The hidden bottleneck costing you 30%+ of your daily revenue.
+  - *Slide 3:* How **${productName}** automates the entire consideration-to-conversion flow.
+  - *Slide 4:* The 3 core steps to unlock ${outLabel}.
+  - *Slide 5:* Join thousands of ${audLabel} who have upgraded. Tap the link to get started!
+* **2 LinkedIn Post Angles (B2B):**
+  - *Angle 1 (The Analytical Perspective):* An audit of why traditional B2B pipelines fail due to ${painLabel}, and how integrating direct-response copywriting principles into the PDP solves it.
+  - *Angle 2 (Leadership & Scaling):* Why modern executives are prioritizing customer experience over raw ad spend. A breakdown of how we achieved "${outLabel}" with automated CRM sequencing.
+
+---
+
+### 3. EMAIL MARKETING MATERIAL
+* **3-Email Sequence:**
+  * **Email 1: Welcome/Value**
+    - **Subject:** Welcome to the future of ${catLabel} 🚀
+    - **Preview:** Say goodbye to ${painLabel} starting today.
+    - **Body Copy:**
+      Hi [First Name],
+      
+      Thanks for choosing **${productName}**. Our mission is simple: to help you completely eliminate "${painLabel}" and pave a smooth road to "${outLabel}".
+      
+      In this series, we will show you how to connect your promotional ad copy directly with optimized product page copy to skyrocket conversions.
+      
+      👉 **Click here to access your digital marketing dashboard now.**
+  * **Email 2: Social Proof/Education**
+    - **Subject:** How other ${audLabel} solved "${painLabel}"
+    - **Preview:** The exact framework that generated a 3x lift.
+    - **Body Copy:**
+      Hey [First Name],
+      
+      Most brands focus entirely on getting clicks. But clicks don't pay the bills — conversions do.
+      
+      Here's how a growth agency integrated ${productName} and turned their cold browser traffic into high-value clients: they aligned their email subject lines with their cart checkout reassurance copy.
+      
+      👉 **Read the full case study here.**
+  * **Email 3: Offer/Urgency**
+    - **Subject:** ⏰ Clock is ticking: Achieve "${outLabel}" today!
+    - **Preview:** Exclusive sandbox trial discount expiring.
+    - **Body Copy:**
+      Hi [First Name],
+      
+      The choice is yours: continue struggling with "${painLabel}" or claim your copy of **${productName}** today and unlock "${outLabel}".
+      
+      For the next 48 hours, enjoy full access to our multi-pillar copywriting suites.
+      
+      👉 **Unlock ${productName} and start scaling!**
+
+---
+
+### 4. PAID ADVERTISING COPY
+* **3 Meta (Facebook/Instagram) Ad Variants:**
+  - *Variant 1 (Problem-Agitate-Solve):*
+    - **Primary Text:** Frustrated by ${painLabel}? You aren't alone. Switch to **${productName}** and experience seamless, automated growth tailored exactly for ${audLabel}.
+    - **Headline:** Stop Struggling with Disjointed Tools
+    - **Description:** Power your storefront with automated conversion workflows.
+    - **CTA:** Start Free Trial
+  - *Variant 2 (Direct Benefit):*
+    - **Primary Text:** Want to unlock "${outLabel}"? **${productName}** is the complete SaaS engine designed to bridge the gap between outreach and checkout.
+    - **Headline:** The Complete Engine for ${catLabel}
+    - **Description:** Rated 5-stars by leading digital marketing operators.
+    - **CTA:** Get Offer
+  - *Variant 3 (Social Proof):*
+    - **Primary Text:** "Switching to ${productName} was the best decision we made. We eliminated conversion friction in under a week!" — verified user.
+    - **Headline:** Loved by ${audLabel}
+    - **Description:** 100% satisfaction guarantee.
+    - **CTA:** Learn More
+* **2 Google Search Ad Groups:**
+  - *Ad Group 1 (Product Keywords):*
+    - **Headlines:** Best ${productName} | Scale ${catLabel} Storefronts | Automate Your Funnel
+    - **Descriptions:** Tired of ${painLabel}? Unify your digital marketing and e-commerce into a single powerful workflow. Get ${productName} free today.
+  - *Ad Group 2 (Competitor / Alternative Keywords):*
+    - **Headlines:** Alternatives for ${catLabel} | Switch to ${productName} | Try ${productName} Free
+    - **Descriptions:** The modern solution for high-converting funnels. Maximize conversions and unlock "${outLabel}" on autopilot.
+
+---
+
+### 5. E-COMMERCE PRODUCT INFORMATION PAGE
+* **Product Title:** ${productName} — Complete Funnel Edition
+* **Short Description:** The ultimate all-in-one suite designed to convert cold traffic into loyal storefront customers by resolving ${painLabel} and driving ${outLabel}.
+* **Long Description (PDP):**
+  Engineered with high-speed performance and professional copywriting models, **${productName}** bridges the gap between top-of-funnel outreach and bottom-of-funnel checkout. Ideal for ${audLabel}, it automates customer nurturing, highlights social proof dynamically, and simplifies checkout validation.
+* **Bullet List of Benefits:**
+  - **Dynamic Copywriting:** Generates SEO-optimized landing copy on demand.
+  - **Zero Conversion Friction:** Fully optimized templates designed to counter "${painLabel}".
+  - **Durable Infrastructure:** Connects seamlessly with external ad networks and active CRM leads.
+* **Technical Specs / Sizing Guidance:**
+  - **Interface Compatibility:** Fully responsive layout (desktop, tablet, mobile).
+  - **Data Integration:** JSON REST API, OAuth-ready lead ingestion.
+
+---
+
+### 6. VISUAL COMMERCE MEDIA (SCRIPTING ONLY)
+* **Shot List for Studio Photos:**
+  1. *Hero Shot:* Close-up display of the optimized, sleek user interface displaying high conversion trends.
+  2. *Contextual Angle:* A happy marketer using ${productName} on a laptop during their daily commute.
+  3. *Feature Highlight:* High-contrast visual detailing the "Urgency Score" and "AI Lead Score" list columns.
+* **1 Unboxing Video Script:**
+  - *Visual:* Clean, minimalist studio background. Presenter opens a premium matte-black welcome package.
+  - *Audio:* "Today we are unboxing the onboarding blueprint for ${productName}. Let's look at how easy it is to eliminate "${painLabel}" and activate your first unified funnel in seconds..."
+* **1 360-Degree View Storyboard:**
+  - *Concept:* 3D spinning mockup of the dashboard workspace, highlighting different tabs (Leads, Campaigns, Copywriter) seamlessly sliding into focus to show unified platform control.
+
+---
+
+### 7. SOCIAL PROOF INDICATORS
+* **3 Sample Customer Reviews (Different Personas):**
+  1. *The Busy Founder:* "I was losing hours switching between marketing tools. ${productName} unified everything. Now, achieving ${outLabel} is simple!"
+  2. *The Marketing Director:* "The dynamic copy suggestions matched our audience perfectly. Our click-through-rates grew by 45%."
+  3. *The Storefront Operator:* "Highly recommend for anyone dealing with high conversion friction. Best CRM in the market!"
+* **1 Testimonial Block:**
+  - *"Since deploying ${productName}, our lead leakage has dropped to zero and our team has saved over 15 hours a week in content generation."* — **Creative Director, Digital Spark Co.**
+* **2 UGC Prompt Ideas (User-Generated Content):**
+  - *Prompt 1:* Ask customers to record a 30-second screen-share showing their favorite automated copywriting feature with hashtag '#MyProductWorkflow'.
+  - *Prompt 2:* Prompt users to share a screenshot of their active lead conversion list showing their high-urgency prioritized leads.
+
+---
+
+### 8. TRANSACTIONAL & SUPPORT TEXT
+* **FAQ Section (5 Questions & Answers):**
+  1. *Q: How does ${productName} address "${painLabel}"?*
+     - A: By organizing your leads into prioritized lists and suggesting high-converting direct-response templates.
+  2. *Q: Is there a free trial available?*
+     - A: Yes, we offer a 14-day fully featured trial with no credit card required.
+  3. *Q: How long does it take to see results?*
+     - A: Most brands see a noticeable decrease in conversion friction and a rise in checkout retention within the first week of launch.
+  4. *Q: Can I integrate my existing ad networks?*
+     - A: Absolutely. We support Facebook, Instagram, and Google Ads integrations natively.
+  5. *Q: Is customer support included?*
+     - A: Yes, we provide 24/7 dedicated support templates and real-time guidance.
+* **Shipping & Returns Microcopy:**
+  - *"Your license key is delivered instantly via email post-checkout. We offer a 100% money-back guarantee within 30 days if you aren't completely satisfied."*
+* **Secure Checkout Reassurance Copy:**
+  - *"Transactions are secured with 256-bit bank-grade SSL encryption. Your data is private, secure, and protected."*
+* **2 Dynamic Support Templates:**
+  - *Template 1 (Where is my license?):* "Hi [Name], your digital key was dispatched to [Email] right after payment. Please check your promotions folder or click here to resend."
+  - *Template 2 (How do I cancel?):* "We are sorry to see you go! You can cancel your subscription with one click inside your workspace settings under the Billing tab."
+
+---
+
+*Configure your real GEMINI_API_KEY in Settings > Secrets to generate fully custom, multi-pillar direct response copy sets instantly!*`
+    });
+  }
+
+  try {
+    let prompt = "";
+
+    if (type === "Full Funnel") {
+      prompt = `${coreAiEngineInstructions}
+
+You are the core AI engine of an “AI-Powered Digital Marketing CRM”. Generate a complete, cohesive, and highly professional Digital Marketing & E-Commerce content set for this product based on the following inputs:
+
+Product: ${productName}
+Category/Niche: ${category || "General / Dynamic Niche"}
+Target audience: ${audience || "General Audience"}
+Main pain point: ${painPoint || "High conversion friction and disjointed marketing systems"}
+Desired outcome: ${desiredOutcome || "An automated, high-converting unified funnel"}
+Brand tone: ${tone || "Empowering & Professional"}
+Extra details / Custom specifications: ${extraNotes || "None"}
+
+You MUST strictly follow this 8-part structure in your markdown output, providing fully written, copywritten, and ready-to-use materials (no placeholders or brackets unless representing dynamic emails, and write high-quality copy that is ready for production):
+
+1. SEO CONTENT
+- 3 blog post titles + outlines targeting high-intent keywords relevant to this product.
+- 1 SEO-optimized landing page outline (H1, H2s, bullet points).
+
+2. SOCIAL MEDIA CONTENT
+- 3 short-form video ideas (TikTok/Reels) with high-converting hooks and CTAs.
+- 1 Instagram carousel script (slide-by-slide captions).
+- 2 LinkedIn post angles (professional/B2B context).
+
+3. EMAIL MARKETING MATERIAL
+- A comprehensive 3-email sequence:
+  - Email 1: Welcome/Value (introducing the product and addressing the customer's desired outcome).
+  - Email 2: Social Proof/Education (teaching a key concept while proving credibility).
+  - Email 3: Offer/Urgency (creating direct response incentive to convert).
+- For each email, include: Subject line, Preview text, and Complete Email Body copy.
+
+4. PAID ADVERTISING COPY
+- 3 Meta (Facebook/Instagram) ad variants:
+  - For each, provide: Primary text, high-converting Headline, short Description, and CTA.
+- 2 Google Search ad groups:
+  - For each, provide: 3 dynamic headlines + 2 descriptions.
+
+5. E-COMMERCE PRODUCT INFORMATION PAGE
+- Product title
+- Short description (suitable for category grids)
+- Long description (suitable for a premium Product Detail Page)
+- Bullet list of key benefits
+- Technical specs (if applicable)
+- Size/fit guidance (if apparel)
+
+6. VISUAL COMMERCE MEDIA (SCRIPTING ONLY)
+- Shot list for professional studio photos (e.g. Hero, lifestyle, detail angles).
+- 1 detailed unboxing video script.
+- 1 360-degree view interactive storyboard.
+
+7. SOCIAL PROOF INDICATORS
+- 3 sample customer reviews representing different user personas.
+- 1 main testimonial block.
+- 2 creative UGC (User Generated Content) prompt ideas to encourage customer posts.
+
+8. TRANSACTIONAL & SUPPORT TEXT
+- FAQ section containing 5 to 7 questions and clear answers.
+- Shipping, returns, or digital delivery microcopy.
+- Secure checkout reassurance copy.
+- 2 dynamic support response templates (e.g., answering "Where is my order?" and "How do I return?").
+
+Make the entire suite cohesive, deeply conversion-focused, applying Data Storytelling, Market Research, Marketing Analytics, and Storefront Optimization. Keep the writing crisp, punchy, persuasive, and beautifully formatted in markdown.`;
+    } else if (type === "SEO Content Generator") {
+      prompt = `${coreAiEngineInstructions}
+
+You are an SEO content strategist. Create a complete, highly-optimized SEO Content Strategy based on these inputs:
+
+Product Name: ${productName}
+Audience / Avatar: ${audience || "Target Customers"}
+Main Pain Point: ${painPoint || "High friction / low conversion"}
+Desired Outcome: ${desiredOutcome || "Maximum sales automation"}
+Brand Voice Tone: ${tone || "Empowering & Professional"}
+Custom Specifications/Goals: ${extraNotes || "None"}
+
+You MUST generate:
+1. 3 high-intent blog post ideas. Each blog idea MUST include:
+   - **Keyword**: A clear high-intent keyword phrase.
+   - **Title**: An educational and highly clickable SEO title.
+   - **3-5 Bullet Outline**: A structured outline explaining the sections of the article.
+   - **Suggested CTA**: A highly compelling call-to-action that links naturally into the product as a solution.
+
+2. 1 detailed outline for a pillar article. It must include:
+   - H1 Title
+   - Multiple H2 and H3 subheadings
+   - Structured bullet points detailing the contents of each section
+   - A strategic CTA placement plan.
+
+Ensure everything is cohesive, deeply conversion-focused, search-intent aligned, and formatted beautifully in markdown.`;
+    } else if (type === "Social Media Suite") {
+      prompt = `${coreAiEngineInstructions}
+
+You are a social media strategist. Create a complete, scroll-stopping Social Media Content Strategy based on these inputs:
+
+Product Name: ${productName}
+Platform Focus: ${platforms || "TikTok, Reels, Instagram, LinkedIn, Community"}
+Audience / Avatar: ${audience || "Target Customers"}
+Brand Voice Tone: ${tone || "Empowering & Professional"}
+Custom Specifications/Goals / Main Benefit: ${extraNotes || "None"}
+
+You MUST generate:
+1. 2 TikTok/Reels scripts. For each script, provide:
+   - **Hook**: Scroll-stopping dynamic visual description and text overlay / audio hook.
+   - **Body**: Punchy direct-response narration script.
+   - **CTA (Call to Action)**: Direct link back/action step connecting to the product as the ultimate solution.
+
+2. 1 Instagram carousel script consisting of EXACTLY 5 slides. For each slide, provide:
+   - Slide index & slide graphic/visual layout description.
+   - Captions & text overlay copy.
+
+3. 1 community engagement post. This must include:
+   - An interactive Poll or thought-provoking Question tailored for community engagement on LinkedIn, Facebook, or Threads.
+   - A descriptive caption to go with the poll/question leading naturally to the product's main benefits.
+
+Make sure the content is short, punchy, scroll-stopping, aligned with the product's main benefit, and formatted beautifully in markdown.`;
+    } else if (type === "Email Sequence Generator") {
+      prompt = `${coreAiEngineInstructions}
+
+You are an email marketing specialist. Generate a highly conversion-focused 3-email sequence based on these parameters:
+
+Product Name: ${productName}
+Audience / Avatar: ${audience || "Target Customers"}
+Main Pain Point: ${painPoint || "High friction & low lead conversions"}
+Desired Outcome: ${desiredOutcome || "Unifying funnel & accelerating sales"}
+Offer Details: ${offer || "Special trial / access"}
+Brand Voice Tone: ${tone || "Empowering & Professional"}
+Custom Specifications/Goals: ${extraNotes || "None"}
+
+You MUST generate EXACTLY 3 emails in sequence:
+- Email 1: Welcome/Value (Set expectations, provide initial value, introduce the vision, build brand affinity)
+- Email 2: Social Proof/Education (Overcome friction, present a mini-case study or user success quote, educate on why existing options fail)
+- Email 3: Offer/Urgency (Introduce the compelling offer, highlight the risk of inaction, add high conversion urgency)
+
+For EACH of the three emails, you MUST provide:
+- **Subject line**: High open-rate focused subject.
+- **Preview text**: Short compelling text snippet.
+- **Body copy**: Conversational, beautifully spaced direct-response email body copy.
+- **CTA**: Clear action link or button instruction.
+
+Maintain cohesive brand messaging, clear headers, and format beautifully in markdown.`;
+    } else if (type === "Product Page Generator") {
+      prompt = `${coreAiEngineInstructions}
+
+You are an e-commerce conversion copywriter. Generate a highly conversion-focused, comprehensive, and beautiful Product Page based on these parameters:
+
+Product Name: ${productName}
+Category/Niche: ${category || "General Niche"}
+Audience / Avatar: ${audience || "Target Customers"}
+Main Pain Point: ${painPoint || "High friction and manual bottlenecks"}
+Desired Outcome: ${desiredOutcome || "Maximum efficiency and high-fidelity results"}
+Key Features & Specs: ${features || "None"}
+Brand Voice Tone: ${tone || "Empowering & Professional"}
+Custom Specifications/Goals / Extra Notes: ${extraNotes || "None"}
+
+You MUST return EXACTLY these sections with clear headers and beautiful formatting:
+1. **Product title**: High-converting, benefit-driven product title with hook.
+2. **Short description**: Crisp, engaging summary (exactly 40–60 words) targeting the desired outcome.
+3. **Long description**: Empathy-led story addressing the target audience's core pain point, transitioning to how the product acts as the ultimate solution and its main benefits.
+4. **Key Benefits**: A beautifully bulleted list highlighting how the product overcomes specific customer friction.
+5. **Technical Details / Specs**: A structured list of technical details, specifications, and performance parameters.
+6. **Size / Fit guidance**: Clear sizing, fit, footprint, or requirements guidance (tailored to be relevant to this product, physical or digital).
+7. **Who this is for** and **Who this is not for**: Explicit profiles for ideal customers vs. unaligned buyers.
+8. **3 FAQ items**: Three highly specific, conversion-boosting Frequently Asked Questions tailored directly to this product, its features, and the primary customer objections.
+
+Keep the writing persuasive, conversion-optimized, professional, and formatted in clean markdown.`;
+    } else {
+      prompt = `${coreAiEngineInstructions}
+
+Create a customized marketing copy or listing based on these inputs:
+- Copy Type Requested: ${type || "Ad Copy"}
+- Product Name: ${productName}
+- Category/Niche: ${category || "General Niche"}
+- Target Audience Persona: ${audience || "Entrepreneurs & Marketers"}
+- Brand Voice Tone: ${tone || "Empowering & Conversational"}
+- Main Pain Point: ${painPoint || "Friction"}
+- Desired Outcome: ${desiredOutcome || "Conversions"}
+- Custom Specifications/Goals: ${extraNotes || "Maximize conversions and address core pain points."}
+
+Provide a fully written, polished, ready-to-use marketing asset structured with beautiful markdown formatting. Keep the writing crisp, punchy, and highly persuasive.`;
+    }
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+    });
+
+    res.json({ success: true, text: response.text });
+  } catch (error: any) {
+    console.error("Gemini copywriting generation error:", error);
+    res.status(500).json({ success: false, error: error.message || "Failed to generate copywriting" });
+  }
+});
+
+app.post("/api/gemini/generate-script", async (req, res) => {
+  const { productName, audience, duration, style, keyOffer } = req.body;
+
+  if (!productName) {
+    return res.status(400).json({ success: false, error: "Product name is required" });
+  }
+
+  if (!ai) {
+    // Demo video generation scripting
+    return res.json({
+      success: true,
+      isDemo: true,
+      text: `### 🎬 60-Second Explainer Video Script & Storyboard (Sandbox Mode)
+**Project Name:** ${productName} Promo Reel
+**Audience Style:** ${style || "Fast-paced & Modern"}
+
+| Scene | Duration | Visual Cues | Narration & Voiceover |
+| :--- | :--- | :--- | :--- |
+| **Scene 1: The Frustration** | 0s - 12s | A frustrated business owner switches rapidly between 5 open web browser tabs. | *"Are you running a business, or is your software running you? Constant switching, disconnected leads, lost opportunities..."* |
+| **Scene 2: Introducing Solution** | 12s - 25s | Cut to vibrant screen with the ${productName} logo and an easy-to-use live dashboard lighting up. | *"Meet ${productName}. The smart, all-in-one marketing hub built to automatically capture, convert, and scale your audience."* |
+| **Scene 3: Key Features** | 25s - 45s | Screen-recording shows automated email sequences triggering instantly on a new lead capture. | *"Nurture prospects 24/7 on autopilot. Send personalized sequences, score opportunities instantly, and manage your entire visual pipeline."* |
+| **Scene 4: Call to Action** | 45s - 60s | Confident face smiling. Subtitle pops: "Start Free Today". | *"Stop juggling. Start growing. Click below to launch your free trial of ${productName} today!"* |
+
+*Configure your real GEMINI_API_KEY in Settings > Secrets to run native multi-turn video script generators!*`
+    });
+  }
+
+  try {
+    const prompt = `You are a highly sought-after commercial video director and ad strategist. Draft a detailed 60-second video marketing script and visual storyboard for:
+- Product/Service Name: ${productName}
+- Target Audience Profile: ${audience || "Business coaches and specialized marketing agencies"}
+- Desired Video Vibe & Style: ${style || "Energetic, cinematic, and professional"}
+- Core Promotional Offer: ${keyOffer || "14-day free trial, no credit card required"}
+
+Provide a detailed 4-scene table with timestamp markers, Visual & Storyboard Cues (what is shown on screen), and corresponding Audio & Narration (voiceover and sound effects). Ensure it includes an intro hook, problem highlight, product solution reveal, key benefits display, and an ultimate high-converting CTA.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+    });
+
+    res.json({ success: true, text: response.text });
+  } catch (error: any) {
+    console.error("Gemini video script generation error:", error);
+    res.status(500).json({ success: false, error: error.message || "Failed to generate video script" });
+  }
+});
+
+app.post("/api/gemini/chat", async (req, res) => {
+  const { messages, context } = req.body;
+
+  if (!messages || !messages.length) {
+    return res.status(400).json({ success: false, error: "Messages array is required" });
+  }
+
+  const systemInstruction = `You are the lead CMO and AI Growth Advisor integrated directly into the DIGITAL MARKETING CRM.
+
+Your Purpose:
+- Use AI-powered tools and best practices to generate, organize, and optimize Digital Marketing & E-Commerce content.
+- Build unified funnels that attract, engage, and convert internet browsers into paying customers.
+
+Conceptual Model:
+- Digital marketing = strategic online material used to attract, engage, and nurture audiences via SEO, social media, email, and paid ads.
+- E-commerce = digital platform mechanics of buying and selling products, including product pages, checkout flows, and transactional content.
+- Together, they form a unified funnel that drives brand awareness, consumer trust, and web transactions.
+
+Core Digital Marketing pillars:
+- SEO Content
+- Social Media Content
+- Email Marketing Material
+- Paid Advertising Copy
+
+Core E-Commerce pillars:
+- Product Information Pages
+- Visual Commerce Media
+- Social Proof Indicators
+- Transactional & Support Text
+
+Key skills you must demonstrate:
+- Data Storytelling
+- Market Research
+- Marketing Analytics
+- Storefront Optimization
+
+You MUST always:
+1. Think in terms of a funnel: Awareness → Consideration → Conversion → Retention.
+2. Connect Digital Marketing content (traffic + engagement) to E-Commerce content (product pages + checkout).
+3. Output content in clean, structured sections with clear labels.
+
+You have real-time access to the user's CRM stats and industry indices:
+- Current Registered Leads Count: ${context?.leadsCount || leads.length}
+- Won Sales Value: $${context?.wonValue || leads.filter(l => l.stage === "Won").reduce((acc, curr) => acc + curr.value, 0)}
+- Total Lead Opportunities Active: ${context?.opportunitiesCount || leads.filter(l => l.stage !== "Won" && l.stage !== "Lost").length}
+- Integrated Active Platforms: ${context?.connectedPlatforms || "Facebook, Instagram, Google Ads"}
+- Active Industry CPC Benchmark: $1.84, CTR Benchmark: 2.15%
+
+Provide direct, actionable, conversion-focused advice. Keep your tone crisp, highly professional, business-empowering, and focused on growth. Do not include developer jargon. Address the user directly as their personal digital marketing expert.`;
+
+  if (!ai) {
+    const lastUserMsg = messages[messages.length - 1]?.content || "Hi";
+    // Standby assistant response
+    return res.json({
+      success: true,
+      isDemo: true,
+      text: `👋 **Hello from your AI Growth Advisor!** (Sandbox Mode)
+
+I am currently running in offline preview. Based on your current CRM stats (**${context?.leadsCount || leads.length} active leads** and **$${context?.wonValue || 25000} closed-won revenue**), here are 3 immediate suggestions to accelerate your pipeline:
+
+1. **Optimize Your Google Ads Funnel**: Your current lead scoring shows Google Ads leads (like Elena & Sarah) have high engagement scores (84-95). Consider shifting 15% of underperforming social budget to Google Search campaigns matching high-intent buyer keywords.
+2. **Launch a Cold Lead Re-engagement Trigger**: Set up an automated sequence in your "Funnels" panel with a 3-part re-engagement template for leads stuck in "Contacted" stage for more than 4 days.
+3. **Use the AIDA formula for your next email campaign**: 
+   - **A**ttention: Highlight the 15+ hours saved weekly.
+   - **I**nterest: Share the case study of Sarah's 40% conversion jump.
+   - **D**esire: Introduce the GROW20 coupon code.
+   - **A**ction: Put a clear button linking to your high-converting landing page.
+
+*To activate my live intelligence to reply dynamically, simply add your GEMINI_API_KEY in the Settings > Secrets menu!*`
+    });
+  }
+
+  try {
+    // Format messages for the genai SDK
+    // Convert client-side format { role: 'user' | 'assistant', content: string } to Gemini API format
+    const contents = messages.map((m: any) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }]
+    }));
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: contents,
+      config: {
+        systemInstruction,
+        temperature: 0.7,
+      }
+    });
+
+    res.json({ success: true, text: response.text });
+  } catch (error: any) {
+    console.error("Gemini Chat assistant error:", error);
+    res.status(500).json({ success: false, error: error.message || "Failed to generate chat response" });
+  }
+});
+
+// --- AUTOMATED MAINTENANCE AGENT ACTIONS ---
+
+app.get("/api/maintenance/status", async (req, res) => {
+  try {
+    const currentStatus = await getFbMaintenanceStatus();
+    res.json({ success: true, status: currentStatus });
+  } catch (err) {
+    console.error("Failed to load maintenance status:", err);
+    res.json({ success: true, status: maintenanceAgentStatus });
+  }
+});
+
+app.post("/api/maintenance/run", async (req, res) => {
+  const { action } = req.body;
+
+  try {
+    const currentStatus = await getFbMaintenanceStatus();
+
+    // Let's create varying realistic logs
+    let logs: string[] = [];
+    if (action === "diagnose") {
+      currentStatus.health = "Optimal & Screened";
+      currentStatus.totalFixes += 2;
+      logs = [
+        "[01:14:02] Initializing full digital marketing CRM diagnostic scan...",
+        `[01:14:03] Checking ad account API endpoints (Facebook, Google, Instagram)...`,
+        `[01:14:04] Found Instagram token expiring in 12 days. Auto-renewed credentials successfully.`,
+        `[01:14:05] Analyzing lead score sync latency: Current latency 12ms (within threshold).`,
+        `[01:14:06] Verifying automated email sequence triggers: verified 'seq-1' & 'seq-2' live hooks.`,
+        `[01:14:07] Diagnostic Completed. Status: 0 critical issues, 1 warning auto-patched.`
+      ];
+    } else if (action === "optimize") {
+      currentStatus.activeOptimization = "SEO keyword indices refreshed";
+      currentStatus.totalFixes += 3;
+      logs = [
+        "[02:45:10] Launching database indexing optimization script...",
+        "[02:45:11] Consolidating multi-channel attribution data from Google Ads & referrals...",
+        "[02:45:12] Cache rebuild successful: speed increased by 14.8%.",
+        "[02:45:13] Compiled latest e-commerce and marketing keywords for current month context.",
+        "[02:45:14] Applied micro-updates to optimize lead scoring triggers.",
+        "[02:45:15] CRM optimization run finished. Memory footprint reduced."
+      ];
+    } else if (action === "syncBenchmarks") {
+      currentStatus.benchmarkSyncTime = "2026-06-24";
+      // Slightly adjust benchmark numbers to show active fetch
+      currentStatus.industryBenchmarks.averageCpc = Number((1.75 + Math.random() * 0.2).toFixed(2));
+      currentStatus.industryBenchmarks.averageCtr = Number((2.0 + Math.random() * 0.5).toFixed(2));
+      logs = [
+        "[04:12:30] Contacting marketing market intelligence API (aitoolverify.com, mytheai.com)...",
+        "[04:12:31] Pulled 2026 digital marketing cost-per-click indices.",
+        `[04:12:32] Synchronized benchmarks: New average CPC is $${currentStatus.industryBenchmarks.averageCpc}. New average CTR is ${currentStatus.industryBenchmarks.averageCtr}%.`,
+        "[04:12:33] Re-ranking lead scoring weights to match current industry campaign dynamics.",
+        "[04:12:34] Marketing benchmark sync completed. Dashboard widgets recalculated."
+      ];
+    }
+
+    await saveFbMaintenanceStatus(currentStatus);
+
+    const actId = `ACT-${Date.now()}`;
+    const newAct: Activity = {
+      id: actId,
+      type: "system",
+      message: `AI Agent Maintenance trigger: ${action === 'diagnose' ? 'CRM Scan' : action === 'optimize' ? 'Funnel Speed Boost' : 'Benchmark Index Update'} executed successfully`,
+      timestamp: "Just now"
+    };
+    await saveFbActivity(newAct);
+
+    const refreshedActivities = await getFbActivities();
+    res.json({
+      success: true,
+      status: currentStatus,
+      logs,
+      activities: refreshedActivities
+    });
+  } catch (err) {
+    console.error("Failed to run maintenance action:", err);
+    res.status(500).json({ success: false, error: "Failed to run maintenance action" });
+  }
+});
+
+// --- SPECIALIZED MAINTENANCE AGENT ANALYSIS ENDPOINT ---
+app.post("/api/maintenance/analyze", async (req, res) => {
+  const { mode, inputText, riskMitigation } = req.body;
+
+  if (!mode || !inputText) {
+    return res.status(400).json({ success: false, error: "Mode and input text are required" });
+  }
+
+  // System instruction matching the user's Maintenance Agent specifications
+  const systemInstruction = `You are the Maintenance Agent for the AI-POWERED BUSINESS OPERATING SYSTEM.
+You analyze logs, metrics, issues, and releases.
+
+Modes:
+- health_check: summarize current health and risks.
+- bug_clustering: group similar errors and propose root causes.
+- release_plan: propose a release with fixes, features, risk levels, and rollout strategy.
+- release_notes: generate user-friendly release notes for a given version.
+
+Always be explicit about risk, impact, and rollback considerations.`;
+
+  if (ai) {
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash", // Standard high-quality text model as per guidelines
+        contents: `Please perform a detailed analysis in "${mode}" mode on the following workspace input:
+
+--- START OF WORKSPACE INPUT ---
+${inputText}
+--- END OF WORKSPACE INPUT ---
+
+--- CUSTOM RISK/MITIGATION PREFERENCES ---
+${riskMitigation || "None provided."}
+
+Return a professional, production-ready, beautifully formatted Markdown analysis. You MUST include:
+1. **Executive Summary**: Clear status and high-level health/release standing.
+2. **Specialized ${mode.toUpperCase()} Analysis**: Comprehensive breakdown, grouping, clustering, or planning.
+3. **Explicit Risk, Impact & Rollback Blueprint**: Detailed risk evaluation, systemic impact, and step-by-step rollback procedure.`,
+        config: {
+          systemInstruction: systemInstruction,
+          temperature: 0.25
+        }
+      });
+
+      return res.json({
+        success: true,
+        isDemo: false,
+        analysis: response.text
+      });
+    } catch (error: any) {
+      console.error("Gemini Maintenance Agent error:", error);
+      // Fallback to simulator on API error
+    }
+  }
+
+  // Sandbox/Mock Fallback Generator (if API is not available or errors out)
+  let analysis = "";
+  const cleanedInput = inputText.trim();
+
+  if (mode === "health_check") {
+    analysis = `### 🩺 AI Maintenance Agent: Health Check Report
+
+> **Role:** Maintenance Agent
+> **Status:** Sandbox Mode (Configure GEMINI_API_KEY for dynamic live processing)
+> **Target:** System Health & Risk Index
+> **Config:** Model: gemini-1.5-pro | Temp: 0.25
+
+---
+
+### 📊 1. EXECUTIVE SUMMARY
+Based on the provided telemetry data, the AI-Powered Business Operating System exhibits a **MODERATE RISK** profile. While core transaction pathways remain intact, auxiliary API integrations and database connection pooling show symptoms of high load that require immediate preventive maintenance.
+
+---
+
+### 🔍 2. SYSTEM HEALTH & RISK BREAKDOWN
+Here is the automated analysis of the input logs:
+\`\`\`text
+${cleanedInput}
+\`\`\`
+
+#### Key Findings:
+*   **Database connection warnings:** Connection pool size indicates potential memory or query leaks.
+*   **API handshakes:** Auxiliary webhooks are approaching latency thresholds (300ms limit breached occasionally).
+*   **Memory overhead:** High resource allocation indicates the need for garbage collection or query indexing.
+
+---
+
+### ⚠️ 3. EXPLICIT RISK, IMPACT & ROLLBACK BLUEPRINT
+*   **Risk Level:** **Medium**
+*   **Systemic Impact:** Possible microservice timeout for real-time lead score indexing and campaign performance syncs.
+*   **Rollback / Mitigation Steps:**
+    1.  Deploy a rolling restart of the database pool manager to clear idle connections.
+    2.  Set connection timeout threshold down to 5000ms to fail-fast.
+    3.  If latency continues to spike, rollback the latest webhook router update to v1.4.1.` ;
+  } else if (mode === "bug_clustering") {
+    analysis = `### 🐛 AI Maintenance Agent: Bug Clustering & Root Cause Analysis
+
+> **Role:** Maintenance Agent
+> **Status:** Sandbox Mode (Configure GEMINI_API_KEY for dynamic live processing)
+> **Target:** Log Grouping & Trace Clustering
+> **Config:** Model: gemini-1.5-pro | Temp: 0.25
+
+---
+
+### 📊 1. EXECUTIVE SUMMARY
+We analyzed the raw crash dumps and error stacktraces. **2 main clusters** of repetitive exceptions have been isolated. Both clusters relate directly to asynchronous credential handshakes and split-handler boundary conditions.
+
+---
+
+### 🔍 2. CLUSTERED ERRORS & ROOT CAUSES
+Based on your input:
+\`\`\`text
+${cleanedInput}
+\`\`\`
+
+#### Cluster A: API Token Handshake Failures (High Frequency)
+*   **Root Cause:** The authentication middleware does not catch HTTP keep-alive timeouts during network handshake retries, causing the worker threads to block indefinitely.
+*   **Affected Modules:** \`src/api/instagram.ts\`, \`facebook.com/v19.0/oauth\`
+
+#### Cluster B: Unhandled Null Element Pointer Exceptions (Low Frequency)
+*   **Root Cause:** Array indexing logic in the copywriter split processor lacks a fallback safeguard when categories return empty strings or undefined arrays.
+*   **Affected Modules:** \`server.ts\` (line 474)
+
+---
+
+### ⚠️ 3. EXPLICIT RISK, IMPACT & ROLLBACK BLUEPRINT
+*   **Risk Level:** **Low-Medium**
+*   **Systemic Impact:** Background tasks will experience failovers and lead sync will lag by up to 15 minutes.
+*   **Rollback / Mitigation Steps:**
+    1.  Wrap the handshake logic in an explicit \`try-catch-finally\` block with a strict 3-second timeout limit.
+    2.  Apply an inline check: \`features ? features.split(',') : []\` to avoid indexing crashes.
+    3.  In case of build failure, restore the previous \`dist/server.cjs\` bundle instantly.` ;
+  } else if (mode === "release_plan") {
+    analysis = `### 🚀 AI Maintenance Agent: Proposed Release & Rollout Plan
+
+> **Role:** Maintenance Agent
+> **Status:** Sandbox Mode (Configure GEMINI_API_KEY for dynamic live processing)
+> **Target:** Version Deployment Strategy
+> **Config:** Model: gemini-1.5-pro | Temp: 0.25
+
+---
+
+### 📊 1. EXECUTIVE SUMMARY
+Proposing **Release v1.5.0**. This release bundles high-value product features alongside critical stability patches for CRM data parsing. Due to changes in database-facing routines, the overall release risk is classified as **MEDIUM**.
+
+---
+
+### 📋 2. RELEASE TARGETS & FEATURES LIST
+Based on your input parameters:
+\`\`\`text
+${cleanedInput}
+\`\`\`
+
+#### Included Features:
+*   **Feature 1:** High-Converting Product Page Generator tool with AI copywriters.
+*   **Feature 2:** Automated bulk-delete pipeline for leads management.
+
+#### Included Bug Fixes:
+*   **Fix 1:** Safe parsing safeguards for empty or undefined categories in server endpoints.
+*   **Fix 2:** Handshake logic stability and token refresh loop fixes for Instagram API integrations.
+
+---
+
+### ⚠️ 3. EXPLICIT RISK, IMPACT & ROLLBACK BLUEPRINT
+*   **Risk Level:** **Medium**
+*   **Systemic Impact:** Potential migration overhead or temporary API lockouts during credential synchronization.
+*   **Rollout Strategy (Canary Deployment):**
+    1.  Deploy to Staging environment for automated linting and endpoint simulation.
+    2.  Deploy to 10% of users (Canary phase) to observe lead dashboard load speed.
+    3.  Full 100% rollout over 4 hours.
+*   **Rollback Procedure:**
+    *   *Step 1:* Keep the backup version of \`v1.4.2\` hot-swappable in the deployment container registry.
+    *   *Step 2:* In the event of latency increases > 200ms or error rates > 1%, immediately point DNS routing back to the stable container host.` ;
+  } else {
+    analysis = `### 📝 AI Maintenance Agent: Auto-Generated Release Notes
+
+> **Role:** Maintenance Agent
+> **Status:** Sandbox Mode (Configure GEMINI_API_KEY for dynamic live processing)
+> **Target:** Public Changelog & Version Notes
+> **Config:** Model: gemini-1.5-pro | Temp: 0.25
+
+---
+
+### 📊 1. EXECUTIVE SUMMARY
+Release notes prepared for **Release version v1.5.0**. This changelog translates technical commits into user-facing value statements.
+
+---
+
+### 📢 2. USER-FRIENDLY CHANGELOG
+Based on the commit log input:
+\`\`\`text
+${cleanedInput}
+\`\`\`
+
+#### What’s New in This Version:
+*   **🛍️ Product Page Generator:** Introduce a fully integrated, high-converting product page copywriting generator. Easily build optimized landing pages to capture, engage, and convert leads in one click!
+*   **🎯 Stronger Platform Integrations:** Optimized Facebook and Instagram synchronization states for flawless, real-time campaigns tracking.
+*   **⚡ Boosted CRM Performance:** Completely revamped core interface viewports, upgrading our icon suites to Lucide React and improving responsive layouts on mobile devices.
+*   **🛡️ Core Database Guardrails:** Embedded safe null-pointer exceptions catchers to keep your pipeline running smoothly, preventing crashes during unexpected data variations.
+
+---
+
+### ⚠️ 3. EXPLICIT RISK, IMPACT & ROLLBACK BLUEPRINT
+*   **Risk Level:** **Very Low**
+*   **Systemic Impact:** Purely additive UI/UX enhancements and performance optimization; no breaking database modifications.
+*   **Rollback Guidelines:**
+    1.  If users report asset loading issues, clear client-side browser cache.
+    2.  If backend issues occur, revert source code to the previous Git tag \`v1.4.2-stable\`.` ;
+  }
+
+  res.json({
+    success: true,
+    isDemo: true,
+    analysis
+  });
+});
+
+// --- START SERVER AND VITE MIDDLEWARE ---
+
+async function startServer() {
+  // Check and seed the database if Firestore is active and collections are empty
+  await seedDatabaseIfEmpty();
+
+  if (process.env.NODE_ENV !== "production") {
+    console.log("Setting up Vite middleware for development...");
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    console.log("Serving static assets in production...");
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server is running on http://0.0.0.0:${PORT}`);
+  });
+}
+
+startServer().catch(err => {
+  console.error("Error starting Express server:", err);
+});

@@ -1,0 +1,119 @@
+{
+  "entities": {
+    "Lead": {
+      "title": "Lead",
+      "description": "A potential customer or sales contact.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "company": { "type": "string" },
+        "email": { "type": "string" },
+        "stage": { "type": "string", "enum": ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"] },
+        "score": { "type": "integer" },
+        "source": { "type": "string" },
+        "value": { "type": "number" },
+        "createdTime": { "type": "string" },
+        "avatarColor": { "type": "string" },
+        "assignedTo": { "type": "string" }
+      },
+      "required": ["id", "name", "email", "stage", "score", "source", "value", "createdTime", "avatarColor"]
+    },
+    "AssignmentRule": {
+      "title": "AssignmentRule",
+      "description": "Rule for routing leads automatically based on source.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "source": { "type": "string" },
+        "assigneeName": { "type": "string" },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["id", "source", "assigneeName", "isActive"]
+    },
+    "Campaign": {
+      "title": "Campaign",
+      "description": "Digital marketing ad campaign performance metrics.",
+      "type": "object",
+      "properties": {
+        "platform": { "type": "string" },
+        "status": { "type": "string", "enum": ["Active", "Paused", "Disconnected"] },
+        "impressions": { "type": "integer" },
+        "clicks": { "type": "integer" },
+        "ctr": { "type": "number" },
+        "spent": { "type": "number" },
+        "conversions": { "type": "integer" },
+        "roi": { "type": "number" }
+      },
+      "required": ["platform", "status", "impressions", "clicks", "ctr", "spent", "conversions", "roi"]
+    },
+    "Activity": {
+      "title": "Activity",
+      "description": "A system or user activity log entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["lead", "email", "deal", "task", "system"] },
+        "message": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "user": { "type": "string" }
+      },
+      "required": ["id", "type", "message", "timestamp"]
+    },
+    "EmailSequence": {
+      "title": "EmailSequence",
+      "description": "Automated multi-step email marketing drip campaign.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "trigger": { "type": "string" },
+        "status": { "type": "string" },
+        "steps": {
+          "type": "array"
+        }
+      },
+      "required": ["id", "name", "trigger", "status", "steps"]
+    },
+    "MaintenanceStatus": {
+      "title": "MaintenanceStatus",
+      "description": "AI-powered digital marketing diagnostic and health status.",
+      "type": "object",
+      "properties": {
+        "lastRun": { "type": "string" },
+        "health": { "type": "string" },
+        "totalFixes": { "type": "integer" },
+        "activeOptimization": { "type": "string" },
+        "benchmarkSyncTime": { "type": "string" },
+        "industryBenchmarks": { "type": "object" }
+      },
+      "required": ["lastRun", "health", "totalFixes", "activeOptimization", "benchmarkSyncTime", "industryBenchmarks"]
+    }
+  },
+  "firestore": {
+    "leads": {
+      "schema": "Lead",
+      "description": "Collection of business leads managed in the CRM"
+    },
+    "assignmentRules": {
+      "schema": "AssignmentRule",
+      "description": "Routing rules configured for inbound leads"
+    },
+    "campaigns": {
+      "schema": "Campaign",
+      "description": "Performance tracking data for digital marketing channels"
+    },
+    "activities": {
+      "schema": "Activity",
+      "description": "CRM activity logs and historical notifications"
+    },
+    "emailSequences": {
+      "schema": "EmailSequence",
+      "description": "E-commerce and marketing drip email sequence records"
+    },
+    "maintenance": {
+      "schema": "MaintenanceStatus",
+      "description": "Automated server health and market benchmark tracking parameters"
+    }
+  }
+}

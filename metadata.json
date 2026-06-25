@@ -1,0 +1,8 @@
+{
+  "name": "DIGITAL MARKETING CRM",
+  "description": "An all-in-one AI-powered platform to automate lead tracking, campaign analytics, automated email sequencing, customizable reporting dashboards, and client communications.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
