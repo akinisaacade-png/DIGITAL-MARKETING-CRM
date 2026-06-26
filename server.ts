@@ -1962,6 +1962,313 @@ I am currently running in offline preview. Based on your current CRM stats (**${
   }
 });
 
+app.post("/api/gemini/orchestrate", async (req, res) => {
+  const { prompt, mode = "orchestrator", customInputs = {} } = req.body;
+
+  if (!prompt) {
+    return res.status(400).json({ success: false, error: "Prompt is required" });
+  }
+
+  // Gather real CRM data for context
+  const activeLeadsSummary = leads.map(l => ({
+    id: l.id,
+    name: l.name,
+    company: l.company,
+    email: l.email,
+    stage: l.stage,
+    score: l.score,
+    source: l.source,
+    value: l.value,
+    created: l.createdTime
+  }));
+
+  const campaignsSummary = campaigns.map(c => ({
+    platform: c.platform,
+    status: c.status,
+    spent: c.spent,
+    clicks: c.clicks,
+    impressions: c.impressions,
+    conversions: c.conversions,
+    ctr: c.ctr,
+    roi: c.roi
+  }));
+
+  const activitiesSummary = activities.slice(0, 15).map(a => ({
+    type: a.type,
+    message: a.message,
+    time: a.timestamp
+  }));
+
+  // Setup agents
+  const agentConfigs = {
+    campaign_content_agent: {
+      name: "Campaign Content Agent",
+      role: "digital marketing strategist and copywriter",
+      system_instruction: "You are a digital marketing strategist and copywriter. Generate on-brand, channel-specific campaign content. Output detailed, ready-to-use copy across Email, Social Media, Paid Ads, and SEO pillars.",
+      getPrompt: (inputs: any) => {
+        const brand = inputs.brand_profile || "A modern marketing automation software";
+        const audience = inputs.audience_segments || "Small business owners, digital agencies";
+        const goal = inputs.goal || "Boost trial signups";
+        const channels = inputs.channels || ["Email", "LinkedIn", "Facebook Ads", "SEO"];
+        const constraints = inputs.constraints || "Keep copy professional, action-oriented, and strictly focused on conversions.";
+        return `Brand: ${JSON.stringify(brand)}; Audience: ${JSON.stringify(audience)}; Goal: ${goal}; Channels: ${JSON.stringify(channels)}; Constraints: ${JSON.stringify(constraints)}\n\nUser instructions: ${prompt}`;
+      }
+    },
+    crm_lead_scoring_agent: {
+      name: "CRM Lead Scoring Agent",
+      role: "CRM intelligence agent for digital marketing",
+      system_instruction: "You are a CRM intelligence agent for digital marketing. Score leads, predict conversions, and surface pipeline risks. Output specific actionable suggestions for which high-score leads to prioritize, which are at risk, and recommend sequence interventions.",
+      getPrompt: (inputs: any) => {
+        const lead_data = inputs.lead_data || activeLeadsSummary;
+        const history = inputs.interaction_history || { activities: activitiesSummary };
+        const campaign_data = inputs.campaign_data || { campaigns: campaignsSummary };
+        return `Leads: ${JSON.stringify(lead_data)}; History: ${JSON.stringify(history)}; Campaigns: ${JSON.stringify(campaign_data)}\n\nUser instructions: ${prompt}`;
+      }
+    },
+    marketing_analytics_agent: {
+      name: "Marketing Analytics Agent",
+      role: "marketing analytics expert",
+      system_instruction: "You are a marketing analytics expert. Diagnose performance changes and recommend actions based on CPC, CTR, Spent, and Conversions. Contrast campaigns with industry benchmarks ($1.84 CPC, 2.15% CTR) and offer tactical steps to improve ROI.",
+      getPrompt: (inputs: any) => {
+        const metrics = inputs.metrics_json || {
+          totalSpent: campaigns.reduce((s, c) => s + c.spent, 0),
+          totalConversions: campaigns.reduce((s, c) => s + c.conversions, 0),
+          averageCtr: campaigns.reduce((s, c) => s + c.ctr, 0) / (campaigns.length || 1),
+          leadsCount: leads.length,
+          wonRevenue: leads.filter(l => l.stage === "Won").reduce((s, l) => s + l.value, 0)
+        };
+        const timeframe = inputs.timeframe || "Last 30 Days";
+        const campaignsData = inputs.campaigns || campaignsSummary;
+        return `Metrics: ${JSON.stringify(metrics)}; Timeframe: ${timeframe}; Campaigns: ${JSON.stringify(campaignsData)}\n\nUser instructions: ${prompt}`;
+      }
+    }
+  };
+
+  // Traces/Logs of routing
+  const logs: string[] = [
+    `[ADK-INIT] Initializing Digital Marketing CRM Multi-Agent Orchestrator...`,
+    `[USER-INPUT] Analyzing prompt length: ${prompt.length} chars. Mode parameter: "${mode}"`,
+  ];
+
+  try {
+    if (!ai) {
+      // Simulation / Offline Demo Mode
+      logs.push(`[STANDBY] Offline sandbox activated. Simulating orchestrator reasoning...`);
+      
+      let selectedAgentKey: "campaign_content_agent" | "crm_lead_scoring_agent" | "marketing_analytics_agent" = "campaign_content_agent";
+      let reasoning = "";
+
+      if (mode !== "orchestrator") {
+        selectedAgentKey = (mode + "_agent") as any;
+        reasoning = `Direct invoke mode activated for ${selectedAgentKey}.`;
+        logs.push(`[ROUTING] Direct invocation request: routing immediately to "${selectedAgentKey}"`);
+      } else {
+        // Simple heuristic for routing simulation
+        const pLower = prompt.toLowerCase();
+        if (pLower.includes("score") || pLower.includes("lead") || pLower.includes("prospect") || pLower.includes("convert") || pLower.includes("risk")) {
+          selectedAgentKey = "crm_lead_scoring_agent";
+          reasoning = "Prompt contains lead management keywords ('score', 'lead', 'prospect', 'risk'). Routed to Lead Scoring & CRM Intelligence.";
+        } else if (pLower.includes("analytics") || pLower.includes("metric") || pLower.includes("roi") || pLower.includes("benchmark") || pLower.includes("ctr") || pLower.includes("cpc") || pLower.includes("performance") || pLower.includes("spent")) {
+          selectedAgentKey = "marketing_analytics_agent";
+          reasoning = "Prompt references quantitative marketing indices ('analytics', 'cpc', 'roi', 'metrics'). Routed to Marketing Analytics Agent.";
+        } else {
+          selectedAgentKey = "campaign_content_agent";
+          reasoning = "Prompt focuses on writing, copy, generation, or general brand materials. Routed to Campaign Content & Copywriter Agent.";
+        }
+        logs.push(`[ORCHESTRATOR-THINKING] Model: gemini-1.5-pro, Temperature: 0.3`);
+        logs.push(`[ORCHESTRATOR-ROUTING] Choice: "${selectedAgentKey}". Reasoning: ${reasoning}`);
+      }
+
+      const activeAgent = agentConfigs[selectedAgentKey];
+      logs.push(`[SPAWN] Spawning child micro-agent: "${activeAgent.name}"...`);
+      logs.push(`[PREPARE] Binding system instructions: "${activeAgent.system_instruction.slice(0, 60)}..."`);
+      logs.push(`[EXECUTE] Invoking child agent API with derived inputs.`);
+
+      // Generate a rich, dynamic mockup based on the actual inputs and prompt
+      let simulatedResult = "";
+      if (selectedAgentKey === "campaign_content_agent") {
+        simulatedResult = `### 🎯 Campaign Intelligence Generated Copy
+
+#### 🌟 SEO Cluster
+- **Target Keywords**: digital CRM, marketing automation, lead engagement
+- **Meta Title**: Automate and Scale Your Pipeline | Intelligent Digital Marketing CRM
+- **Meta Description**: Say goodbye to lead leakage. Nurture, score, and convert leads 24/7 with our AI-powered unified sales funnel.
+- **Content Pillar Hook**: "Why 92% of SaaS startups fail to nurture leads in the first 24 hours—and how a unified intelligence layer changes the game."
+
+#### 📱 Social Media (LinkedIn/X Post)
+- **Hook**: 🚨 Your marketing campaigns are leaking cash. Here's why.
+- **Body**: Most agencies focus purely on traffic. They run high-budget ads, get thousands of clicks, and then... let those leads cold-decay in a spreadsheets drawer. 
+  Our Multi-Agent Marketing system connects your web traffic directly to instant lead scoring and email touchpoints.
+- **Hashtags**: #DigitalMarketing #SaaS #LeadGeneration #B2BGrowth #CRMIntelligence
+
+#### ✉️ Email Campaign Draft
+- **Subject Line**: How to stop losing leads to slow follow-ups
+- **Personalization**: Target high-value prospects with scores > 85
+- **Body**:
+  Hi {{Lead.Name}},
+  
+  When an interested prospect clicks your ad, you have exactly 15 minutes before their buying intent drops by 80%.
+  
+  Our AI-Powered Digital Marketing CRM scores incoming prospects instantly. High-value leads from Google Ads are instantly matched with representatives like Sarah Connor, while an automated sequence triggers to maintain momentum.
+  
+  Stop letting valuable revenue slip through the cracks.
+  
+  Best regards,
+  The Growth Team
+
+#### 💰 Conversion Ad Copy
+- **Headline**: Close 40% More Leads Automagically
+- **Primary Text**: Stop guessing which leads are ready to buy. Let our AI scoring engine prioritize your pipeline while you focus on closing.
+- **Call To Action**: Start 7-Day Free Trial`;
+      } else if (selectedAgentKey === "crm_lead_scoring_agent") {
+        simulatedResult = `### 👤 CRM Lead Scoring & Conversion Predictions
+
+Based on active CRM records and interaction log analytics, here is the current lead analysis:
+
+#### 🏆 Top Prospects to Prioritize
+1. **Sarah Jenkins** (Score: **95** | Value: **$4,500** | Source: Google Ads)
+   - *Status*: Qualified
+   - *Risk/Action*: Exceptionally high intent. Last activity reports high engagement with product tour. Recommend sending a customized proposal immediately.
+2. **Marcus Vance** (Score: **92** | Value: **$12,500** | Source: Website)
+   - *Status*: Proposal
+   - *Risk/Action*: Deal size is $12,500 (our largest active pipeline). Score is 92. Assigned to Alex Mercer. A follow-up call on the proposal constraints should be dispatched today.
+
+#### ⚠️ Pipeline Risks & Cold Leads
+- **Amanda Lopez** (Score: **45** | Value: **$1,500** | Source: Instagram)
+   - *Status*: New
+   - *Risk/Action*: Low interaction score of 45. Leads from Instagram show a historically slower close cycle. Recommend assigning to a warm email nurturing sequence rather than manual outbound calling.
+
+#### 💡 Agent Interventions & Strategic Recommendation
+- **High Friction Channels**: Instagram leads are converting at 1.2% compared to Website leads at 4.8%. Shift automated lead sequences for social leads to feature visual video storyboards first.`;
+      } else {
+        simulatedResult = `### 📊 Campaign Performance Analytics Report
+
+Analysis prepared comparing active ad platform integrations to current standard benchmarks:
+
+#### 📈 Performance vs Industry Benchmarks
+- **Average CTR**: Active campaigns average **${(campaigns.reduce((s,c)=>s+c.ctr, 0)/(campaigns.length || 1)).toFixed(2)}%** vs. Benchmark **2.15%** (${(campaigns.reduce((s,c)=>s+c.ctr, 0)/(campaigns.length || 1)) >= 2.15 ? "🟢 BEATING TARGET" : "🔴 UNDERPERFORMING"}).
+- **Average CPC**: Active CPC averages **$1.68** vs. Benchmark **$1.84** (🟢 **Cost-Efficient** - saving $0.16 per click).
+- **Top Performer**: **Google Ads** with **${campaigns.find(c=>c.platform==="Google Ads")?.roi ?? 3.4}x ROI** driving the largest share of high-scoring prospects.
+
+#### 🔍 Bottleneck Diagnoses
+- **Facebook Campaigns**: Spent **$2,450** with **${campaigns.find(c=>c.platform==="Facebook")?.clicks ?? 120} clicks**, CTR is low. Landing page friction is likely high.
+- **Instagram Attribution**: High click volume, but low lead score correlation. The audience targeting might be too broad.
+
+#### 🎯 Strategic Action Plan
+1. **Budget Redistribution**: Reallocate 15% of the Facebook ad budget to Google Ads search intent campaigns.
+2. **Ad Creative Optimization**: Refresh Instagram copy focusing on direct buyer pain points (use the "AI Copywriter" tab to draft new direct-response hooks).
+3. **Friction Reduction**: Simplify checkout/lead-capture form on the website landing pages to elevate organic conversion rate above 3.5%.`;
+      }
+
+      logs.push(`[FORMAT] Formatting final markdown report.`);
+      logs.push(`[DONE] Orchestration loop completed successfully.`);
+
+      return res.json({
+        success: true,
+        isDemo: true,
+        orchestratedBy: "Digital Marketing CRM – Orchestrator",
+        agent: selectedAgentKey,
+        agentName: activeAgent.name,
+        reasoning: reasoning,
+        derivedInputs: {
+          prompt,
+          mode,
+          timestamp: new Date().toISOString()
+        },
+        logs: logs,
+        text: simulatedResult
+      });
+    }
+
+    // --- REAL AI ORCHESTRATION ---
+    let selectedAgentKey: "campaign_content_agent" | "crm_lead_scoring_agent" | "marketing_analytics_agent" = "campaign_content_agent";
+    let reasoning = "";
+
+    if (mode !== "orchestrator") {
+      selectedAgentKey = (mode + "_agent") as any;
+      reasoning = `Direct invoke request. Mode set to "${mode}".`;
+      logs.push(`[ROUTING] Direct invocation request: routing immediately to "${selectedAgentKey}"`);
+    } else {
+      logs.push(`[ORCHESTRATOR-THINKING] Consulting central orchestrator routing logic...`);
+      // Use Gemini to analyze user intent and select the appropriate agent
+      const orchestratorSystemInstruction = `You are a digital marketing CRM orchestrator.
+Analyze the user's request and select the single most appropriate sub-agent to handle it:
+- "campaign_content_agent": Use for requests about writing ad copy, email sequences, social media posts, blog content, landing page copy, or brand strategies.
+- "crm_lead_scoring_agent": Use for requests about prioritizing leads, scoring leads, predicting conversions, diagnosing pipeline risks, or analyzing customer relationship histories.
+- "marketing_analytics_agent": Use for requests about analyzing campaign ROI, CTR, CPC, marketing budgets, performance changes, or comparing data against industry benchmarks.
+
+You MUST respond strictly in a valid JSON object structure with exactly these keys:
+{
+  "selected_agent": "campaign_content_agent" | "crm_lead_scoring_agent" | "marketing_analytics_agent",
+  "reasoning": "A concise explanation of why this agent was chosen based on the user's intent"
+}`;
+
+      try {
+        const routeResponse = await ai.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: `User Prompt: "${prompt}"`,
+          config: {
+            systemInstruction: orchestratorSystemInstruction,
+            temperature: 0.1,
+            responseMimeType: "application/json"
+          }
+        });
+
+        const routeData = JSON.parse(routeResponse.text || "{}");
+        if (routeData.selected_agent && agentConfigs[routeData.selected_agent as keyof typeof agentConfigs]) {
+          selectedAgentKey = routeData.selected_agent;
+          reasoning = routeData.reasoning || "Routed based on natural language intent analysis.";
+        } else {
+          reasoning = "Orchestrator fallback: default to Campaign Content Agent.";
+        }
+        logs.push(`[ORCHESTRATOR-ROUTING] Choice: "${selectedAgentKey}". Reasoning: ${reasoning}`);
+      } catch (err: any) {
+        logs.push(`[ORCHESTRATOR-WARN] Intent parser failed: ${err.message || ""}. Falling back to default campaign agent.`);
+        reasoning = "Failed to parse intent JSON, defaulting to Campaign Content Agent.";
+      }
+    }
+
+    const activeAgent = agentConfigs[selectedAgentKey];
+    logs.push(`[SPAWN] Spawning child micro-agent: "${activeAgent.name}"...`);
+    logs.push(`[PREPARE] Binding system instructions: "${activeAgent.system_instruction.slice(0, 50)}..."`);
+    
+    const formattedPrompt = activeAgent.getPrompt(customInputs);
+    logs.push(`[EXECUTE] Invoking child agent with derived telemetry inputs.`);
+
+    const agentResponse = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: formattedPrompt,
+      config: {
+        systemInstruction: activeAgent.system_instruction,
+        temperature: 0.3
+      }
+    });
+
+    logs.push(`[FORMAT] Processing output stream markdown...`);
+    logs.push(`[DONE] Orchestration loop completed successfully.`);
+
+    res.json({
+      success: true,
+      orchestratedBy: "Digital Marketing CRM – Orchestrator",
+      agent: selectedAgentKey,
+      agentName: activeAgent.name,
+      reasoning: reasoning,
+      derivedInputs: {
+        prompt,
+        mode,
+        leads_scanned: activeLeadsSummary.length,
+        campaigns_scanned: campaignsSummary.length,
+      },
+      logs: logs,
+      text: agentResponse.text
+    });
+
+  } catch (error: any) {
+    console.error("Multi-Agent Orchestration error:", error);
+    res.status(500).json({ success: false, error: error.message || "Failed to orchestrate task", logs });
+  }
+});
+
 // --- AUTOMATED MAINTENANCE AGENT ACTIONS ---
 
 app.get("/api/maintenance/status", async (req, res) => {

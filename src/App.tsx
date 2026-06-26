@@ -25,6 +25,7 @@ import CopywriterView from "./components/CopywriterView";
 import ChatbotView from "./components/ChatbotView";
 import MaintenanceView from "./components/MaintenanceView";
 import SettingsView from "./components/SettingsView";
+import OrchestratorView from "./components/OrchestratorView";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>("dashboard");
@@ -362,6 +363,8 @@ export default function App() {
         );
       case "copywriter":
         return <CopywriterView />;
+      case "orchestrator":
+        return <OrchestratorView />;
       case "chatbot":
         return <ChatbotView leads={leads} />;
       case "maintenance":
@@ -437,6 +440,7 @@ export default function App() {
               { id: "marketing", label: "Platform Integrations", icon: <Share2 size={14} /> },
               { id: "automation", label: "Email Sequences", icon: <Mail size={14} /> },
               { id: "copywriter", label: "AI Copy & Video Storyboard", icon: <Sparkles size={14} /> },
+              { id: "orchestrator", label: "AI Orchestrator (ADK)", icon: <Layers size={14} /> },
               { id: "chatbot", label: "AI CMO Assistant", icon: <Bot size={14} /> },
               { id: "maintenance", label: "Maintenance & Agent Logs", icon: <Cpu size={14} /> },
               { id: "settings", label: "CRM Settings & Rules", icon: <Settings size={14} /> },
