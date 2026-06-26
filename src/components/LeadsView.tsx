@@ -190,6 +190,107 @@ export default function LeadsView({
   // New lead form modal states
   const [showAddModal, setShowAddModal] = useState(false);
   const [selectedLeadForDetail, setSelectedLeadForDetail] = useState<Lead | null>(null);
+
+  // AI Lead Scoring state and triggers
+  const [isScoringLead, setIsScoringLead] = useState<boolean>(false);
+  const [scoringResult, setScoringResult] = useState<string>("");
+
+  const handleStageChangeAndRecalculate = async (lead: Lead, newStage: Lead["stage"]) => {
+    setIsScoringLead(true);
+    setScoringResult("AI is evaluating lead stage conversion...");
+    try {
+      // First update the stage locally and on backend so we keep it fast
+      onUpdateLeadStage(lead.id, newStage);
+      setSelectedLeadForDetail({
+        ...lead,
+        stage: newStage
+      });
+      if (onAddActivity) {
+        onAddActivity("lead", `🔄 Updated Lead ${lead.name} stage to ${newStage}`);
+      }
+
+      // Now query crm_lead_scoring_agent to recalculate score
+      const res = await fetch("/api/gemini/orchestrate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: `Calculate a new numeric lead score between 1 and 100 for lead '${lead.name}' who has been updated to stage '${newStage}'. Source is '${lead.source}' and value is $${lead.value}. Return a JSON object containing exactly 'score' (number) and 'rationale' (string), e.g. {"score": 85, "rationale": "Explanation of score"}.`,
+          mode: "lead"
+        })
+      });
+      const data = await res.json();
+      let calculatedScore = lead.score;
+      let rationaleText = "";
+
+      if (data.success && data.text) {
+        const text = data.text;
+        try {
+          const jsonMatch = text.match(/\{[\s\S]*?\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            if (typeof parsed.score === "number") {
+              calculatedScore = parsed.score;
+              rationaleText = parsed.rationale || "";
+            }
+          }
+        } catch (e) {
+          console.warn("Could not parse JSON from scoring response, falling back to regex", e);
+        }
+
+        if (calculatedScore === lead.score) {
+          const scoreMatch = text.match(/score["'\s:]+(\d+)/i) || text.match(/(\d+)\s*points/i) || text.match(/score\s*of\s*(\d+)/i);
+          if (scoreMatch) {
+            calculatedScore = parseInt(scoreMatch[1]);
+          }
+        }
+      }
+
+      // Ensure calculated score is valid 1-100
+      if (isNaN(calculatedScore) || calculatedScore < 1 || calculatedScore > 100 || calculatedScore === lead.score) {
+        let stageScore = 40;
+        if (newStage === "Contacted") stageScore = 55;
+        else if (newStage === "Qualified") stageScore = 75;
+        else if (newStage === "Proposal") stageScore = 88;
+        else if (newStage === "Won") stageScore = 100;
+        else if (newStage === "Lost") stageScore = 15;
+
+        let sourceBonus = 0;
+        if (lead.source === "Referrals" || lead.source === "Referral") sourceBonus = 12;
+        else if (lead.source === "Google Ads") sourceBonus = 8;
+        else if (lead.source === "Website") sourceBonus = 5;
+        else if (lead.source === "Facebook" || lead.source === "Facebook Ads") sourceBonus = 2;
+        else if (lead.source === "Instagram" || lead.source === "Instagram Ads") sourceBonus = 1;
+
+        const valueBonus = Math.min(15, Math.floor((lead.value || 0) / 1500));
+        calculatedScore = Math.max(1, Math.min(100, stageScore + sourceBonus + valueBonus));
+        rationaleText = `CRM Lead Scoring Agent automated recalculation for updated pipeline stage: ${newStage}.`;
+      }
+
+      const updateRes = await fetch(`/api/leads/${lead.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stage: newStage, score: calculatedScore })
+      });
+      const updateData = await updateRes.json();
+      if (updateData.success) {
+        setSelectedLeadForDetail({
+          ...lead,
+          stage: newStage,
+          score: calculatedScore
+        });
+        if (onAddActivity) {
+          onAddActivity("lead", `🎯 CRM Lead Scoring Agent updated ${lead.name}'s priority score to ${calculatedScore} based on transition to ${newStage}`);
+        }
+        setScoringResult(`AI Recalculated Score: ${calculatedScore}. ${rationaleText ? `Rationale: ${rationaleText}` : ""}`);
+      }
+    } catch (err) {
+      console.error("Failed to automatically recalculate lead score:", err);
+      setScoringResult("Failed to automatically trigger AI lead scoring recalculation.");
+    } finally {
+      setIsScoringLead(false);
+      setTimeout(() => setScoringResult(""), 10000);
+    }
+  };
   
   // Web Speech Recognition state & handlers
   const [isListening, setIsListening] = useState(false);
@@ -968,14 +1069,7 @@ export default function LeadsView({
                         value={selectedLeadForDetail.stage}
                         onChange={(e) => {
                           const newStage = e.target.value as Lead["stage"];
-                          onUpdateLeadStage(selectedLeadForDetail.id, newStage);
-                          setSelectedLeadForDetail({
-                            ...selectedLeadForDetail,
-                            stage: newStage
-                          });
-                          if (onAddActivity) {
-                            onAddActivity("lead", `🔄 Updated Lead ${selectedLeadForDetail.name} stage to ${newStage}`);
-                          }
+                          handleStageChangeAndRecalculate(selectedLeadForDetail, newStage);
                         }}
                         className="w-full text-xs font-semibold bg-white border border-slate-200 hover:border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500/10 cursor-pointer"
                       >
@@ -987,6 +1081,16 @@ export default function LeadsView({
                         <option value="Won">Won</option>
                         <option value="Lost">Lost</option>
                       </select>
+
+                      {/* AI lead scoring loading/success status */}
+                      {(isScoringLead || scoringResult) && (
+                        <div className={`mt-2 p-2 rounded-lg text-[10px] flex items-start gap-1.5 leading-relaxed font-medium ${
+                          isScoringLead ? "bg-amber-50 text-amber-800 border border-amber-100 animate-pulse" : "bg-emerald-50 text-emerald-800 border border-emerald-100"
+                        }`}>
+                          <Sparkles size={11} className={`mt-0.5 shrink-0 ${isScoringLead ? "text-amber-500 animate-spin" : "text-emerald-500"}`} />
+                          <span>{isScoringLead ? "AI Score recalculating..." : scoringResult}</span>
+                        </div>
+                      )}
                     </div>
 
                     <div>

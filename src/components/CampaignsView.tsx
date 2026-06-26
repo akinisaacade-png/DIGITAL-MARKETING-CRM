@@ -59,6 +59,67 @@ export default function CampaignsView({ campaigns, onToggleCampaign, onSyncCampa
     "LinkedIn Ads": 1.0
   });
 
+  // AI Ad copy modal states
+  const [showCopyModal, setShowCopyModal] = useState(false);
+  const [selectedPlatformForCopy, setSelectedPlatformForCopy] = useState<string>("");
+  const [targetAudience, setTargetAudience] = useState<string>("Small business owners, digital marketing agencies");
+  const [campaignGoal, setCampaignGoal] = useState<string>("Increase SaaS free trial sign-ups");
+  const [brandProfile, setBrandProfile] = useState<string>("AI-Powered Digital Marketing CRM Suite - a unified hub for attracting, engaging, and converting prospects.");
+  const [toneOfVoice, setToneOfVoice] = useState<string>("Professional & Conversion-focused");
+  const [isGeneratingCopy, setIsGeneratingCopy] = useState<boolean>(false);
+  const [generatedCopy, setGeneratedCopy] = useState<string>("");
+  const [copiedText, setCopiedText] = useState<boolean>(false);
+
+  const handleGenerateCopy = async () => {
+    if (!selectedPlatformForCopy) return;
+    setIsGeneratingCopy(true);
+    setGeneratedCopy("");
+    try {
+      const promptText = `Please draft high-converting ad copies for the ${selectedPlatformForCopy} channel.
+Target Audience: ${targetAudience}
+Campaign Goal: ${campaignGoal}
+Brand Profile: ${brandProfile}
+Tone: ${toneOfVoice}
+
+Generate exactly 3 creative ad variations (e.g. ad headlines, primary texts, and call-to-actions) optimized specifically for the unique audience and placement layout of ${selectedPlatformForCopy}. Label each clearly so the user can easily deploy them.`;
+
+      const res = await fetch("/api/gemini/orchestrate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: promptText,
+          mode: "campaign_content",
+          customInputs: {
+            brand_profile: brandProfile,
+            audience_segments: targetAudience,
+            goal: campaignGoal,
+            channels: [selectedPlatformForCopy]
+          }
+        })
+      });
+      const data = await res.json();
+      if (data.success && data.text) {
+        setGeneratedCopy(data.text);
+        if (onAddActivity) {
+          onAddActivity("system", `✍️ Generated custom ad variations for ${selectedPlatformForCopy} targeting ${targetAudience}`);
+        }
+      } else {
+        setGeneratedCopy("Failed to generate campaign copy. Please check your API key configuration.");
+      }
+    } catch (err) {
+      console.error("Failed to generate ad copy:", err);
+      setGeneratedCopy("Failed to generate ad copy. An error occurred during request dispatching.");
+    } finally {
+      setIsGeneratingCopy(false);
+    }
+  };
+
+  const handleCopyToClipboard = () => {
+    navigator.clipboard.writeText(generatedCopy);
+    setCopiedText(true);
+    setTimeout(() => setCopiedText(false), 2000);
+  };
+
   const filteredCampaigns = campaigns.filter(camp => {
     if (!globalSearchQuery) return true;
     return camp.platform.toLowerCase().includes(globalSearchQuery.toLowerCase()) ||
@@ -524,15 +585,29 @@ export default function CampaignsView({ campaigns, onToggleCampaign, onSyncCampa
 
                 <div className="flex items-center gap-2">
                   {isConnected && (
-                    <button 
-                      id={`toggle-status-${camp.platform.toLowerCase().replace(' ', '-')}`}
-                      onClick={() => onToggleCampaign(camp.platform)}
-                      className={`text-[10px] font-bold px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
-                        isActive ? "bg-amber-50 text-amber-700 hover:bg-amber-100" : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                      }`}
-                    >
-                      {isActive ? "Pause Campaign" : "Resume Campaign"}
-                    </button>
+                    <>
+                      <button 
+                        id={`generate-copy-${camp.platform.toLowerCase().replace(' ', '-')}`}
+                        onClick={() => {
+                          setSelectedPlatformForCopy(camp.platform);
+                          setShowCopyModal(true);
+                          setGeneratedCopy("");
+                        }}
+                        className="text-[10px] font-bold px-2.5 py-1 rounded-md bg-indigo-50 hover:bg-indigo-100 text-indigo-700 transition-colors cursor-pointer flex items-center gap-1 border border-indigo-100"
+                      >
+                        <Sparkles size={11} className="text-indigo-500 animate-pulse" />
+                        Generate Copy
+                      </button>
+                      <button 
+                        id={`toggle-status-${camp.platform.toLowerCase().replace(' ', '-')}`}
+                        onClick={() => onToggleCampaign(camp.platform)}
+                        className={`text-[10px] font-bold px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                          isActive ? "bg-amber-50 text-amber-700 hover:bg-amber-100" : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                        }`}
+                      >
+                        {isActive ? "Pause Campaign" : "Resume Campaign"}
+                      </button>
+                    </>
                   )}
 
                   <button 
@@ -705,6 +780,146 @@ export default function CampaignsView({ campaigns, onToggleCampaign, onSyncCampa
           </div>
         </div>
       </div>
+
+      {/* AI Ad Copywriter Modal */}
+      {showCopyModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 transition-all animate-fade-in">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            {/* Modal Header */}
+            <div className="px-6 py-4 bg-slate-50 border-b border-slate-100 flex justify-between items-center shrink-0">
+              <div className="flex items-center gap-2">
+                <Sparkles className="text-indigo-600 w-5 h-5 animate-pulse" />
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">AI Campaign Copy Generator</h3>
+                  <p className="text-[10px] text-slate-500 font-medium">Invoking campaign_content_agent for {selectedPlatformForCopy}</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowCopyModal(false)}
+                className="p-1.5 hover:bg-slate-200/60 text-slate-400 hover:text-slate-600 rounded-lg transition-colors cursor-pointer"
+                title="Close modal"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 overflow-y-auto space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Brand Profile */}
+                <div className="md:col-span-2">
+                  <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block mb-1">Brand Profile</label>
+                  <textarea
+                    value={brandProfile}
+                    onChange={(e) => setBrandProfile(e.target.value)}
+                    className="w-full text-xs bg-slate-50/50 border border-slate-200 rounded-lg p-2 h-16 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500/15 focus:bg-white transition-all font-medium text-slate-700"
+                    placeholder="Describe your brand, product or service..."
+                  />
+                </div>
+
+                {/* Target Audience */}
+                <div>
+                  <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block mb-1">Target Audience</label>
+                  <input
+                    type="text"
+                    value={targetAudience}
+                    onChange={(e) => setTargetAudience(e.target.value)}
+                    className="w-full text-xs bg-slate-50/50 border border-slate-200 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 focus:bg-white transition-all font-medium text-slate-700"
+                    placeholder="e.g. Small business owners, agencies"
+                  />
+                </div>
+
+                {/* Campaign Goal */}
+                <div>
+                  <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block mb-1">Campaign Goal</label>
+                  <input
+                    type="text"
+                    value={campaignGoal}
+                    onChange={(e) => setCampaignGoal(e.target.value)}
+                    className="w-full text-xs bg-slate-50/50 border border-slate-200 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 focus:bg-white transition-all font-medium text-slate-700"
+                    placeholder="e.g. Boost trial signups, sell widgets"
+                  />
+                </div>
+
+                {/* Platform / Channel Pre-fill */}
+                <div>
+                  <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block mb-1">Platform Channel</label>
+                  <input
+                    type="text"
+                    disabled
+                    value={selectedPlatformForCopy}
+                    className="w-full text-xs bg-slate-100 border border-slate-200 rounded-lg p-2 text-slate-500 font-bold"
+                  />
+                </div>
+
+                {/* Tone of Voice Selection */}
+                <div>
+                  <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block mb-1">Tone of Voice</label>
+                  <select
+                    value={toneOfVoice}
+                    onChange={(e) => setToneOfVoice(e.target.value)}
+                    className="w-full text-xs bg-slate-50/50 border border-slate-200 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 focus:bg-white transition-all font-semibold text-slate-700 cursor-pointer"
+                  >
+                    <option value="Professional & Conversion-focused">Professional & Conversion-focused</option>
+                    <option value="Creative, High-energy & Punchy">Creative, High-energy & Punchy</option>
+                    <option value="Direct-Response & Benefit-driven">Direct-Response & Benefit-driven</option>
+                    <option value="Sassy, Witty & Story-driven">Sassy, Witty & Story-driven</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Action Button */}
+              <button
+                onClick={handleGenerateCopy}
+                disabled={isGeneratingCopy}
+                className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-bold text-xs transition-colors shadow-xs hover:shadow-md cursor-pointer flex items-center justify-center gap-2"
+              >
+                {isGeneratingCopy ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Generating copy variations...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Draft Copy Variations
+                  </>
+                )}
+              </button>
+
+              {/* Output block */}
+              {(isGeneratingCopy || generatedCopy) && (
+                <div className="bg-slate-50 rounded-xl border border-slate-100 p-4.5 relative animate-fade-in">
+                  <div className="flex justify-between items-center mb-2 border-b border-slate-200/60 pb-1.5">
+                    <span className="text-[10px] text-indigo-600 font-extrabold uppercase tracking-wider">Generated Copy Output</span>
+                    {generatedCopy && !isGeneratingCopy && (
+                      <button
+                        onClick={handleCopyToClipboard}
+                        className="text-[10px] font-bold text-indigo-600 hover:text-indigo-700 transition-colors flex items-center gap-1 cursor-pointer"
+                      >
+                        {copiedText ? "Copied!" : "Copy to Clipboard"}
+                      </button>
+                    )}
+                  </div>
+
+                  {isGeneratingCopy ? (
+                    <div className="space-y-2 py-4 animate-pulse">
+                      <div className="h-3 bg-slate-200 rounded w-3/4 animate-pulse"></div>
+                      <div className="h-3 bg-slate-200 rounded w-5/6 animate-pulse"></div>
+                      <div className="h-3 bg-slate-200 rounded w-2/3 animate-pulse"></div>
+                      <div className="h-3 bg-slate-200 rounded w-1/2 animate-pulse"></div>
+                    </div>
+                  ) : (
+                    <pre className="text-xs text-slate-700 whitespace-pre-wrap font-sans leading-relaxed select-text overflow-y-auto max-h-60 bg-white p-3 rounded-lg border border-slate-150">
+                      {generatedCopy}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

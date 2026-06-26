@@ -1,8 +1,154 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // Global default-deny safety net
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
+    }
+
+    // --- REUSABLE SECURITY & VALIDATION PRIMITIVES ---
+
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+
+    // --- ENTITY-SPECIFIC VALIDATION BLUEPRINTS ---
+
+    // 1. Lead Schema Validation
+    function isValidLead(data) {
+      return data.keys().hasAll(['id', 'name', 'email', 'stage', 'score', 'source', 'value', 'createdTime', 'avatarColor'])
+        && data.keys().size() <= 12
+        && data.id is string && data.id.size() <= 128
+        && data.name is string && data.name.size() <= 128
+        && data.email is string && data.email.size() <= 128
+        && data.stage is string && data.stage in ['New', 'Contacted', 'Qualified', 'Proposal', 'Won', 'Lost']
+        && data.score is int && data.score >= 1 && data.score <= 100
+        && data.source is string && data.source.size() <= 128
+        && data.value is number && data.value >= 0
+        && data.createdTime is string && data.createdTime.size() <= 64
+        && data.avatarColor is string && data.avatarColor.size() <= 64
+        && (!data.keys().hasAny(['assignedTo']) || data.assignedTo is string)
+        && (!data.keys().hasAny(['assignedAgent']) || data.assignedAgent is string);
+    }
+
+    // 2. AssignmentRule Schema Validation
+    function isValidAssignmentRule(data) {
+      return data.keys().hasAll(['id', 'source', 'assigneeName', 'isActive'])
+        && data.keys().size() == 4
+        && data.id is string && data.id.size() <= 128
+        && data.source is string && data.source.size() <= 128
+        && data.assigneeName is string && data.assigneeName.size() <= 128
+        && data.isActive is bool;
+    }
+
+    // 3. Campaign Schema Validation
+    function isValidCampaign(data) {
+      return data.keys().hasAll(['platform', 'status', 'impressions', 'clicks', 'ctr', 'spent', 'conversions', 'roi'])
+        && data.keys().size() == 8
+        && data.platform is string && data.platform.size() <= 128
+        && data.status is string && data.status in ['Active', 'Paused', 'Disconnected']
+        && data.impressions is int && data.impressions >= 0
+        && data.clicks is int && data.clicks >= 0
+        && data.ctr is number && data.ctr >= 0
+        && data.spent is number && data.spent >= 0
+        && data.conversions is int && data.conversions >= 0
+        && data.roi is number && data.roi >= 0;
+    }
+
+    // 4. Activity Schema Validation
+    function isValidActivity(data) {
+      return data.keys().hasAll(['id', 'type', 'message', 'timestamp'])
+        && (data.keys().size() == 4 || (data.keys().size() == 5 && data.keys().hasAll(['user'])))
+        && data.id is string && data.id.size() <= 128
+        && data.type is string && data.type in ['lead', 'email', 'deal', 'task', 'system']
+        && data.message is string && data.message.size() <= 1000
+        && data.timestamp is string && data.timestamp.size() <= 64
+        && (!data.keys().hasAny(['user']) || (data.user is string && data.user.size() <= 128));
+    }
+
+    // 5. EmailSequence Schema Validation
+    function isValidEmailSequence(data) {
+      return data.keys().hasAll(['id', 'name', 'trigger', 'status', 'steps'])
+        && data.keys().size() == 5
+        && data.id is string && data.id.size() <= 128
+        && data.name is string && data.name.size() <= 128
+        && data.trigger is string && data.trigger.size() <= 128
+        && data.status is string && data.status.size() <= 64
+        && data.steps is list && data.steps.size() <= 20;
+    }
+
+    // 6. MaintenanceStatus Schema Validation
+    function isValidMaintenanceStatus(data) {
+      return data.keys().hasAll(['lastRun', 'health', 'totalFixes', 'activeOptimization', 'benchmarkSyncTime', 'industryBenchmarks'])
+        && data.keys().size() == 6
+        && data.lastRun is string && data.lastRun.size() <= 64
+        && data.health is string && data.health.size() <= 64
+        && data.totalFixes is int && data.totalFixes >= 0
+        && data.activeOptimization is string && data.activeOptimization.size() <= 256
+        && data.benchmarkSyncTime is string && data.benchmarkSyncTime.size() <= 64
+        && data.industryBenchmarks is map;
+    }
+
+    // 7. Agent Schema Validation
+    function isValidAgent(data) {
+      return data.keys().hasAll(['id', 'name', 'role', 'isActive'])
+        && data.keys().size() == 4
+        && data.id is string && data.id.size() <= 128
+        && data.name is string && data.name.size() <= 128
+        && data.role is string && data.role.size() <= 128
+        && data.isActive is bool;
+    }
+
+    // --- SECURED COLLECTIONS ---
+
+    // Leads Collection
+    match /leads/{leadId} {
+      allow read: if true;
+      allow create, update: if isValidId(leadId) && isValidLead(request.resource.data);
+      allow delete: if isValidId(leadId);
+    }
+
+    // Assignment Rules Collection
+    match /assignmentRules/{ruleId} {
+      allow read: if true;
+      allow create, update: if isValidId(ruleId) && isValidAssignmentRule(request.resource.data);
+      allow delete: if isValidId(ruleId);
+    }
+
+    // Campaigns Collection
+    match /campaigns/{campaignId} {
+      allow read: if true;
+      allow create, update: if isValidId(campaignId) && isValidCampaign(request.resource.data);
+      allow delete: if isValidId(campaignId);
+    }
+
+    // Activities Collection
+    match /activities/{activityId} {
+      allow read: if true;
+      allow create, update: if isValidId(activityId) && isValidActivity(request.resource.data);
+      allow delete: if isValidId(activityId);
+    }
+
+    // Email Sequences Collection
+    match /emailSequences/{seqId} {
+      allow read: if true;
+      allow create, update: if isValidId(seqId) && isValidEmailSequence(request.resource.data);
+      allow delete: if isValidId(seqId);
+    }
+
+    // Maintenance Collection
+    match /maintenance/{docId} {
+      allow read: if true;
+      allow create, update: if isValidId(docId) && isValidMaintenanceStatus(request.resource.data);
+      allow delete: if isValidId(docId);
+    }
+
+    // Agents Collection
+    match /agents/{agentId} {
+      allow read: if true;
+      allow create, update: if isValidId(agentId) && isValidAgent(request.resource.data);
+      allow delete: if isValidId(agentId);
     }
   }
 }

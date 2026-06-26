@@ -326,6 +326,7 @@ export default function App() {
             globalSearchQuery={globalSearchQuery}
             onClearGlobalSearch={() => setGlobalSearchQuery("")}
             maintenanceStatus={maintenanceStatus}
+            isLoading={isLoading}
           />
         );
       case "leads":
@@ -483,7 +484,7 @@ export default function App() {
 
       {/* Main content display viewport */}
       <main className="flex-1 overflow-y-auto p-4 md:p-8 relative" id="main-content-viewport">
-        {isLoading ? (
+        {isLoading && activeTab !== "dashboard" ? (
           <div className="absolute inset-0 bg-white/80 backdrop-blur-xs flex flex-col items-center justify-center gap-4 z-30">
             <div className="w-10 h-10 rounded-full border-4 border-slate-100 border-t-indigo-600 animate-spin" />
             <p className="text-xs font-semibold text-slate-500 animate-pulse">Initializing DIGITAL MARKETING CRM Full-Stack Database Context...</p>
