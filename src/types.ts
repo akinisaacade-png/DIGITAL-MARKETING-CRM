@@ -10,6 +10,7 @@ export interface Lead {
   createdTime: string;
   avatarColor: string;
   assignedTo?: string;
+  assignedAgent?: string;
 }
 
 export interface AssignmentRule {
@@ -66,3 +67,11 @@ export interface MaintenanceStatus {
     marketGrowthRate: string;
   };
 }
+
+export interface Agent {
+  id: string;
+  name: string;
+  role: string;
+  isActive: boolean;
+}
+

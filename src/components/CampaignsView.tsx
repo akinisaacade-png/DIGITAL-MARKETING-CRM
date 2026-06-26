@@ -15,18 +15,43 @@ import {
   ExternalLink,
   ChevronRight,
   ArrowUpRight,
-  ArrowDownRight
+  ArrowDownRight,
+  Sparkles,
+  Bell,
+  BellRing,
+  AlertTriangle,
+  X
 } from "lucide-react";
+import { 
+  AreaChart, 
+  Area, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  Legend, 
+  ResponsiveContainer 
+} from "recharts";
 import { Campaign } from "../types";
+
+export const BUDGET_LIMITS: Record<string, number> = {
+  "Facebook Ads": 5000,
+  "Instagram Ads": 4000,
+  "Google Ads": 8000,
+  "LinkedIn Ads": 3000
+};
 
 interface CampaignsViewProps {
   campaigns: Campaign[];
   onToggleCampaign: (platform: string) => void;
   onSyncCampaigns: () => void;
   globalSearchQuery?: string;
+  onAddActivity?: (type: "lead" | "email" | "deal" | "task" | "system", message: string) => void;
 }
 
-export default function CampaignsView({ campaigns, onToggleCampaign, onSyncCampaigns, globalSearchQuery = "" }: CampaignsViewProps) {
+export default function CampaignsView({ campaigns, onToggleCampaign, onSyncCampaigns, globalSearchQuery = "", onAddActivity }: CampaignsViewProps) {
+  const [budgetAlertEnabled, setBudgetAlertEnabled] = useState(false);
+  const [dismissedAlerts, setDismissedAlerts] = useState<Record<string, boolean>>({});
   const [budgetMultipliers, setBudgetMultipliers] = useState<Record<string, number>>({
     "Facebook Ads": 1.0,
     "Instagram Ads": 1.0,
@@ -47,6 +72,27 @@ export default function CampaignsView({ campaigns, onToggleCampaign, onSyncCampa
       ...budgetMultipliers,
       [platform]: newVal
     });
+  };
+
+  const handleToggleBudgetAlert = () => {
+    const nextState = !budgetAlertEnabled;
+    setBudgetAlertEnabled(nextState);
+    if (nextState) {
+      setDismissedAlerts({});
+      
+      if (onAddActivity) {
+        campaigns.forEach(camp => {
+          if (camp.status === "Active") {
+            const scaledSpent = getScaledMetric(camp.spent, camp.platform);
+            const limit = BUDGET_LIMITS[camp.platform] || 5000;
+            const percentage = (scaledSpent / limit) * 100;
+            if (percentage >= 80) {
+              onAddActivity("system", `🚨 BUDGET WARNING: Campaign on ${camp.platform} has reached ${percentage.toFixed(0)}% of monthly budget ($${scaledSpent.toLocaleString()} of $${limit.toLocaleString()}).`);
+            }
+          }
+        });
+      }
+    }
   };
 
   const getScaledMetric = (baseVal: number, platform: string, isInt: boolean = true) => {
@@ -120,8 +166,86 @@ export default function CampaignsView({ campaigns, onToggleCampaign, onSyncCampa
     }
   };
 
+  // Historical ROI Comparison data for Recharts (scaled by budget multipliers to be fully interactive!)
+  const baseRoiHistory = [
+    { name: "Jan", "Facebook Ads": 2.2, "Instagram Ads": 1.7, "Google Ads": 3.1, "LinkedIn Ads": 1.1 },
+    { name: "Feb", "Facebook Ads": 2.4, "Instagram Ads": 2.0, "Google Ads": 3.0, "LinkedIn Ads": 1.4 },
+    { name: "Mar", "Facebook Ads": 2.9, "Instagram Ads": 2.4, "Google Ads": 3.5, "LinkedIn Ads": 1.7 },
+    { name: "Apr", "Facebook Ads": 3.1, "Instagram Ads": 2.8, "Google Ads": 3.7, "LinkedIn Ads": 1.9 },
+    { name: "May", "Facebook Ads": 3.4, "Instagram Ads": 3.5, "Google Ads": 3.4, "LinkedIn Ads": 2.3 },
+    { name: "Jun", "Facebook Ads": 3.6, "Instagram Ads": 3.9, "Google Ads": 3.3, "LinkedIn Ads": 2.2 }
+  ];
+
+  const scaledRoiHistory = baseRoiHistory.map(item => {
+    return {
+      name: item.name,
+      "Facebook Ads": Number((item["Facebook Ads"] * (budgetMultipliers["Facebook Ads"] || 1.0)).toFixed(1)),
+      "Instagram Ads": Number((item["Instagram Ads"] * (budgetMultipliers["Instagram Ads"] || 1.0)).toFixed(1)),
+      "Google Ads": Number((item["Google Ads"] * (budgetMultipliers["Google Ads"] || 1.0)).toFixed(1)),
+      "LinkedIn Ads": Number((item["LinkedIn Ads"] * (budgetMultipliers["LinkedIn Ads"] || 1.0)).toFixed(1))
+    };
+  });
+
+  // Find which active campaigns are >= 80% of their limit
+  const activeAlerts = campaigns
+    .filter(camp => camp.status === "Active")
+    .map(camp => {
+      const scaledSpent = getScaledMetric(camp.spent, camp.platform);
+      const limit = BUDGET_LIMITS[camp.platform] || 5000;
+      const percentage = (scaledSpent / limit) * 100;
+      return {
+        platform: camp.platform,
+        spent: scaledSpent,
+        limit,
+        percentage,
+        isTriggered: percentage >= 80
+      };
+    })
+    .filter(alert => alert.isTriggered && !dismissedAlerts[alert.platform]);
+
   return (
     <div className="space-y-6 animate-fadeIn" id="campaigns-integrations-view">
+      
+      {/* Dynamic Toast Notifications container */}
+      {budgetAlertEnabled && activeAlerts.length > 0 && (
+        <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-3 max-w-sm w-full pointer-events-auto animate-slideUp">
+          {activeAlerts.map(alert => (
+            <div 
+              key={alert.platform}
+              className="bg-slate-900 text-white rounded-xl shadow-2xl border border-rose-500/30 p-4 flex gap-3 relative overflow-hidden"
+              id={`toast-budget-${alert.platform.toLowerCase().replace(' ', '-')}`}
+            >
+              {/* Left accent bar */}
+              <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-rose-505 bg-rose-500" />
+              
+              <div className="p-1 bg-rose-500/10 text-rose-400 rounded-lg h-fit">
+                <AlertTriangle size={16} />
+              </div>
+              <div className="flex-1 min-w-0 pr-6">
+                <p className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                  Budget Warning: {alert.platform}
+                </p>
+                <p className="text-[11px] text-slate-300 mt-1 leading-normal">
+                  Allocated spend limit is at <strong className="text-rose-400 font-bold">{alert.percentage.toFixed(0)}%</strong>. Spent <strong className="text-white font-mono font-bold">${alert.spent.toLocaleString()}</strong> of <strong className="text-slate-400 font-mono">${alert.limit.toLocaleString()}</strong>.
+                </p>
+                {/* Progress bar inside toast */}
+                <div className="w-full bg-slate-800 rounded-full h-1 mt-2 overflow-hidden">
+                  <div className="bg-rose-500 h-full" style={{ width: `${Math.min(100, alert.percentage)}%` }} />
+                </div>
+              </div>
+
+              {/* Dismiss button */}
+              <button
+                onClick={() => setDismissedAlerts({ ...dismissedAlerts, [alert.platform]: true })}
+                className="absolute top-3 right-3 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                title="Dismiss warning"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       
       {/* Header section */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-5 gap-4">
@@ -139,6 +263,56 @@ export default function CampaignsView({ campaigns, onToggleCampaign, onSyncCampa
           >
             <RefreshCw size={13} className="text-indigo-500 animate-spin" />
             Pull Fresh Ad Analytics
+          </button>
+        </div>
+      </div>
+
+      {/* Budget Alert Toggle Switch Card */}
+      <div className="bg-white border border-slate-100 rounded-2xl p-5 shadow-3xs flex flex-col md:flex-row md:items-center justify-between gap-4" id="budget-alert-banner">
+        <div className="flex items-start gap-3.5">
+          <div className={`p-2.5 rounded-xl ${budgetAlertEnabled ? 'bg-indigo-50 text-indigo-600 animate-pulse' : 'bg-slate-100 text-slate-400'}`}>
+            {budgetAlertEnabled ? <BellRing size={18} /> : <Bell size={18} />}
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+              Automated Budget Safeguard Monitoring
+              {budgetAlertEnabled && (
+                <span className="text-[10px] bg-emerald-50 text-emerald-700 font-extrabold px-2 py-0.5 rounded-full flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Active
+                </span>
+              )}
+            </h3>
+            <p className="text-xs text-slate-500 mt-1">
+              Enable real-time tracking of platform spends. Triggers toast warnings and system logs when any campaign spend hits or exceeds <strong className="text-indigo-600 font-semibold">80% of its monthly limit</strong>.
+            </p>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-slate-400 font-mono font-medium mt-2">
+              <span className="bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100">Facebook Limit: $5,000</span>
+              <span className="bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100">Instagram Limit: $4,000</span>
+              <span className="bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100">Google Ads Limit: $8,000</span>
+              <span className="bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100">LinkedIn Limit: $3,000</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Toggle Switch */}
+        <div className="flex items-center gap-3 self-end md:self-auto shrink-0">
+          <span className="text-xs font-bold text-slate-600">
+            {budgetAlertEnabled ? "Monitoring Enabled" : "Monitoring Disabled"}
+          </span>
+          <button
+            id="budget-alert-toggle-btn"
+            onClick={handleToggleBudgetAlert}
+            className={`w-12 h-6.5 rounded-full p-1 transition-colors duration-300 focus:outline-hidden cursor-pointer flex items-center ${
+              budgetAlertEnabled ? "bg-indigo-600" : "bg-slate-200"
+            }`}
+            title="Toggle Safeguard Alerts"
+          >
+            <div
+              className={`bg-white w-4.5 h-4.5 rounded-full shadow-md transform transition-transform duration-300 ${
+                budgetAlertEnabled ? "translate-x-5.5" : "translate-x-0"
+              }`}
+            />
           </button>
         </div>
       </div>
@@ -203,6 +377,109 @@ export default function CampaignsView({ campaigns, onToggleCampaign, onSyncCampa
             </span>
             <span className="text-[9px] text-slate-400 mt-1">vs last week</span>
           </div>
+        </div>
+      </div>
+
+      {/* Historical Campaign ROI Comparison (Recharts) */}
+      <div className="bg-white border border-slate-100 rounded-2xl p-6 shadow-2xs" id="campaigns-roi-comparison-chart-card">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between border-b border-slate-100/50 pb-4 mb-6 gap-4">
+          <div>
+            <div className="flex items-center gap-1.5">
+              <Sparkles size={14} className="text-amber-500 animate-pulse" />
+              <h3 className="text-sm font-extrabold text-slate-900 uppercase tracking-wider">Historical ROI Comparison (Interactive)</h3>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              Simulated real-time predictive ROI shifts across connected channels based on custom budget multipliers.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-[10px] font-bold text-slate-500">
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-blue-600 block" /> Facebook</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-pink-500 block" /> Instagram</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-red-500 block" /> Google</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-blue-700 block" /> LinkedIn</span>
+          </div>
+        </div>
+
+        <div className="h-[280px] w-full" id="historical-roi-chart-wrapper">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={scaledRoiHistory} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+              <defs>
+                <linearGradient id="colorFb" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#2563eb" stopOpacity={0.1}/>
+                  <stop offset="95%" stopColor="#2563eb" stopOpacity={0.0}/>
+                </linearGradient>
+                <linearGradient id="colorInsta" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#ec4899" stopOpacity={0.1}/>
+                  <stop offset="95%" stopColor="#ec4899" stopOpacity={0.0}/>
+                </linearGradient>
+                <linearGradient id="colorGoogle" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#ef4444" stopOpacity={0.1}/>
+                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0.0}/>
+                </linearGradient>
+                <linearGradient id="colorLinkedIn" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#1d4ed8" stopOpacity={0.1}/>
+                  <stop offset="95%" stopColor="#1d4ed8" stopOpacity={0.0}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+              <XAxis 
+                dataKey="name" 
+                tickLine={false} 
+                axisLine={false} 
+                tick={{ fill: '#94a3b8', fontSize: 10, fontWeight: 600 }} 
+              />
+              <YAxis 
+                tickLine={false} 
+                axisLine={false} 
+                tick={{ fill: '#94a3b8', fontSize: 10, fontWeight: 600 }} 
+                unit="x"
+              />
+              <Tooltip 
+                contentStyle={{ 
+                  backgroundColor: '#0f172a', 
+                  borderRadius: '12px', 
+                  border: 'none',
+                  color: '#fff',
+                  fontSize: '11px',
+                  boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)'
+                }}
+                itemStyle={{ color: '#fff' }}
+                labelStyle={{ fontWeight: 'bold', color: '#38bdf8', marginBottom: '4px' }}
+              />
+              <Area 
+                type="monotone" 
+                dataKey="Facebook Ads" 
+                stroke="#2563eb" 
+                strokeWidth={2}
+                fillOpacity={1} 
+                fill="url(#colorFb)" 
+              />
+              <Area 
+                type="monotone" 
+                dataKey="Instagram Ads" 
+                stroke="#ec4899" 
+                strokeWidth={2}
+                fillOpacity={1} 
+                fill="url(#colorInsta)" 
+              />
+              <Area 
+                type="monotone" 
+                dataKey="Google Ads" 
+                stroke="#ef4444" 
+                strokeWidth={2}
+                fillOpacity={1} 
+                fill="url(#colorGoogle)" 
+              />
+              <Area 
+                type="monotone" 
+                dataKey="LinkedIn Ads" 
+                stroke="#1d4ed8" 
+                strokeWidth={2}
+                fillOpacity={1} 
+                fill="url(#colorLinkedIn)" 
+              />
+            </AreaChart>
+          </ResponsiveContainer>
         </div>
       </div>
 

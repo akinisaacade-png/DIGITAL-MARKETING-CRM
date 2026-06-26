@@ -88,6 +88,18 @@
         "industryBenchmarks": { "type": "object" }
       },
       "required": ["lastRun", "health", "totalFixes", "activeOptimization", "benchmarkSyncTime", "industryBenchmarks"]
+    },
+    "Agent": {
+      "title": "Agent",
+      "description": "An assigned sales agent who can receive allocated leads.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string" },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["id", "name", "role", "isActive"]
     }
   },
   "firestore": {
@@ -114,6 +126,10 @@
     "maintenance": {
       "schema": "MaintenanceStatus",
       "description": "Automated server health and market benchmark tracking parameters"
+    },
+    "agents": {
+      "schema": "Agent",
+      "description": "Roster of assigned sales agents who handle lead pipeline allocation"
     }
   }
 }

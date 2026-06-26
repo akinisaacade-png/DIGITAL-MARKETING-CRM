@@ -12,29 +12,26 @@ import {
   Users,
   Shield,
   ArrowRight,
-  Database
+  Database,
+  X
 } from "lucide-react";
-import { AssignmentRule } from "../types";
+import { AssignmentRule, Agent } from "../types";
 
 export default function SettingsView() {
   const [rules, setRules] = useState<AssignmentRule[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isAgentsLoading, setIsAgentsLoading] = useState(true);
+  
   const [newRule, setNewRule] = useState({
     source: "Website",
-    assigneeName: "Alex Mercer",
+    assigneeName: "",
     isActive: true
   });
-  const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
-  // Suggested team members
-  const teamMembers = [
-    "Alex Mercer",
-    "Sarah Connor",
-    "Marcus Wright",
-    "Elena Rostova",
-    "David Kim",
-    "Chloe Frazier"
-  ];
+  const [newAgentName, setNewAgentName] = useState("");
+  const [newAgentRole, setNewAgentRole] = useState("Sales Specialist");
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
   // Common sources
   const leadSources = [
@@ -48,6 +45,7 @@ export default function SettingsView() {
 
   useEffect(() => {
     fetchRules();
+    fetchAgents();
   }, []);
 
   const fetchRules = async () => {
@@ -62,6 +60,24 @@ export default function SettingsView() {
       console.error("Failed to load assignment rules:", err);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const fetchAgents = async () => {
+    try {
+      setIsAgentsLoading(true);
+      const res = await fetch("/api/settings/agents");
+      const data = await res.json();
+      if (data.success) {
+        setAgents(data.agents);
+        if (data.agents.length > 0) {
+          setNewRule(prev => ({ ...prev, assigneeName: data.agents[0].name }));
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load agents:", err);
+    } finally {
+      setIsAgentsLoading(false);
     }
   };
 
@@ -80,7 +96,7 @@ export default function SettingsView() {
         setRules(data.rules);
         setNewRule({
           source: "Website",
-          assigneeName: "Alex Mercer",
+          assigneeName: agents.length > 0 ? agents[0].name : "",
           isActive: true
         });
         triggerStatus("Rule created successfully!");
@@ -119,6 +135,74 @@ export default function SettingsView() {
       }
     } catch (err) {
       console.error("Failed to delete rule:", err);
+    }
+  };
+
+  const handleAssignAgentToSource = async (agentName: string, source: string) => {
+    const existingRule = rules.find(r => r.source.toLowerCase() === source.toLowerCase());
+    try {
+      let res;
+      if (existingRule) {
+        res = await fetch(`/api/settings/rules/${existingRule.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ assigneeName: agentName, isActive: true })
+        });
+      } else {
+        res = await fetch("/api/settings/rules", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source, assigneeName: agentName, isActive: true })
+        });
+      }
+      const data = await res.json();
+      if (data.success) {
+        setRules(data.rules);
+        triggerStatus(`Assigned ${agentName} to ${source} leads.`);
+      }
+    } catch (err) {
+      console.error("Failed to assign agent to lead source rule:", err);
+    }
+  };
+
+  const handleAddAgent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newAgentName.trim() || !newAgentRole.trim()) return;
+
+    try {
+      const res = await fetch("/api/settings/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newAgentName.trim(), role: newAgentRole.trim(), isActive: true })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setAgents(data.agents);
+        setNewAgentName("");
+        setNewAgentRole("Sales Specialist");
+        // Update first assignee name in rules setup if it was empty
+        if (!newRule.assigneeName && data.agents.length > 0) {
+          setNewRule(prev => ({ ...prev, assigneeName: data.agents[0].name }));
+        }
+        triggerStatus(`Agent ${newAgentName.trim()} added successfully!`);
+      }
+    } catch (err) {
+      console.error("Failed to add agent:", err);
+    }
+  };
+
+  const handleDeleteAgent = async (id: string) => {
+    try {
+      const res = await fetch(`/api/settings/agents/${id}`, {
+        method: "DELETE"
+      });
+      const data = await res.json();
+      if (data.success) {
+        setAgents(data.agents);
+        triggerStatus("Agent removed from active roster.");
+      }
+    } catch (err) {
+      console.error("Failed to delete agent:", err);
     }
   };
 
@@ -202,9 +286,17 @@ export default function SettingsView() {
                   onChange={(e) => setNewRule({ ...newRule, assigneeName: e.target.value })}
                   className="w-full text-xs border border-slate-200 rounded-xl px-3 py-2.5 bg-white text-slate-700 outline-hidden focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 transition-all cursor-pointer font-medium"
                 >
-                  {teamMembers.map(member => (
-                    <option key={member} value={member}>{member}</option>
-                  ))}
+                  {isAgentsLoading ? (
+                    <option value="" disabled>Loading team members...</option>
+                  ) : agents.length === 0 ? (
+                    <option value="" disabled>No active agents. Please add one below.</option>
+                  ) : (
+                    agents.map(agent => (
+                      <option key={agent.id} value={agent.name}>
+                        {agent.name}
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
 
@@ -339,6 +431,148 @@ export default function SettingsView() {
                 ))}
               </div>
             )}
+          </div>
+
+          {/* Assigned Agents Directory Section */}
+          <div className="bg-white border border-slate-100 rounded-2xl p-6 shadow-xs">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-5 gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Users size={16} className="text-indigo-500" />
+                  Assigned Agents Directory
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">Manage sales team members available for lead allocation rules.</p>
+              </div>
+              <span className="text-[10px] font-mono font-bold text-slate-500 bg-slate-100 border border-slate-200/50 px-2.5 py-0.5 rounded-full self-start sm:self-center">
+                {agents.length} agent{agents.length !== 1 ? "s" : ""} active
+              </span>
+            </div>
+
+            {/* List of Agents */}
+            {isAgentsLoading ? (
+              <div className="py-6 flex flex-col items-center justify-center gap-2">
+                <div className="w-6 h-6 rounded-full border-2 border-slate-100 border-t-indigo-600 animate-spin" />
+                <span className="text-xs text-slate-400">Syncing sales agents roster...</span>
+              </div>
+            ) : agents.length === 0 ? (
+              <div className="border border-dashed border-slate-100 rounded-2xl p-6 text-center text-slate-400 italic text-xs mb-4">
+                No active sales agents registered. Please use the form below to add team members.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6" id="settings-agents-list">
+                {agents.map((agent) => {
+                  const agentRules = rules.filter(r => r.assigneeName.toLowerCase() === agent.name.toLowerCase() && r.isActive);
+                  return (
+                    <div 
+                      key={agent.id}
+                      className="flex flex-col p-4 bg-slate-50 border border-slate-100 rounded-2xl group hover:bg-slate-100/30 transition-all gap-3"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-8 h-8 rounded-full bg-indigo-50 border border-indigo-100/50 text-indigo-700 flex items-center justify-center font-bold text-xs uppercase shadow-3xs shrink-0">
+                            {agent.name.charAt(0)}
+                          </div>
+                          <div className="truncate">
+                            <span className="text-xs font-bold text-slate-800 block leading-tight">{agent.name}</span>
+                            <span className="text-[10px] text-slate-400 block leading-tight mt-0.5">{agent.role}</span>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => handleDeleteAgent(agent.id)}
+                          className="text-slate-400 hover:text-red-500 p-1.5 rounded-lg hover:bg-white border border-transparent hover:border-slate-100 transition-all md:opacity-0 group-hover:opacity-100 cursor-pointer shrink-0"
+                          title={`Remove ${agent.name} from roster`}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+
+                      {/* Rule assignments list with add/remove actions */}
+                      <div className="border-t border-slate-200/50 pt-2">
+                        <span className="text-[9px] uppercase font-black text-slate-400 tracking-wider block mb-1">Lead Assignments</span>
+                        
+                        {agentRules.length === 0 ? (
+                          <p className="text-[10px] text-slate-400 italic">No assigned rules</p>
+                        ) : (
+                          <div className="flex flex-wrap gap-1 mb-2">
+                            {agentRules.map(r => (
+                              <span key={r.id} className="inline-flex items-center gap-1 bg-indigo-50 border border-indigo-150 text-indigo-700 font-extrabold text-[9px] px-2 py-0.5 rounded-full select-none">
+                                {r.source}
+                                <button 
+                                  onClick={() => handleDeleteRule(r.id)}
+                                  className="text-indigo-400 hover:text-indigo-950 transition-colors shrink-0 cursor-pointer animate-pulse"
+                                  title={`Remove ${agent.name} from ${r.source} distribution`}
+                                >
+                                  <X size={10} className="stroke-[2.5px]" />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Quick Add Distribution Rule Selection */}
+                        <div className="mt-2">
+                          <select
+                            onChange={(e) => {
+                              if (e.target.value) {
+                                handleAssignAgentToSource(agent.name, e.target.value);
+                                e.target.value = ""; // reset
+                              }
+                            }}
+                            defaultValue=""
+                            className="w-full text-[10px] font-bold border border-slate-200 rounded-lg px-2 py-1 bg-white text-slate-500 cursor-pointer hover:bg-slate-50 hover:border-slate-300 transition-all outline-hidden"
+                          >
+                            <option value="" disabled>+ Add distribution rule...</option>
+                            {leadSources.map(source => {
+                              const isAssignedToThisAgent = agentRules.some(r => r.source.toLowerCase() === source.toLowerCase());
+                              return (
+                                <option key={source} value={source} disabled={isAssignedToThisAgent}>
+                                  {source} {isAssignedToThisAgent ? "(Assigned)" : ""}
+                                </option>
+                              );
+                            })}
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Add Agent Inline Form */}
+            <form onSubmit={handleAddAgent} className="border-t border-slate-100 pt-5 mt-4">
+              <h4 className="text-xs font-bold text-slate-700 mb-3 uppercase tracking-wider text-[10px]">Register New Agent</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
+                <div className="sm:col-span-2">
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. John Doe"
+                    value={newAgentName}
+                    onChange={(e) => setNewAgentName(e.target.value)}
+                    className="w-full text-xs border border-slate-200 rounded-xl px-3 py-2 bg-slate-50/50 focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Sales Specialist"
+                    value={newAgentRole}
+                    onChange={(e) => setNewAgentRole(e.target.value)}
+                    className="w-full text-xs border border-slate-200 rounded-xl px-3 py-2 bg-slate-50/50 focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="sm:col-span-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-900 hover:bg-slate-850 text-white rounded-xl text-[11px] font-bold transition-all shadow-xs cursor-pointer"
+                >
+                  <Plus size={14} />
+                  Add Agent
+                </button>
+              </div>
+            </form>
           </div>
           
           {/* Diagnostic overview flow block */}

@@ -88,6 +88,27 @@ export default function App() {
     fetchAllData();
   }, []);
 
+  // Periodic background polling for live heat-score changes & campaign updates
+  useEffect(() => {
+    const pollUpdates = async () => {
+      try {
+        const [leadsRes, activitiesRes] = await Promise.all([
+          fetch("/api/leads"),
+          fetch("/api/activities")
+        ]);
+        const leadsData = await leadsRes.json();
+        const activitiesData = await activitiesRes.json();
+        if (leadsData.success) setLeads(leadsData.leads);
+        if (activitiesData.success) setActivities(activitiesData.activities);
+      } catch (err) {
+        console.error("Error polling background updates:", err);
+      }
+    };
+
+    const interval = setInterval(pollUpdates, 12000); // Poll every 12s for active visual updates
+    return () => clearInterval(interval);
+  }, []);
+
   // --- DATABASE MUTATION DISPATCHERS ---
 
   const handleAddLead = async (leadData: Partial<Lead>) => {
@@ -110,12 +131,17 @@ export default function App() {
     }
   };
 
-  const handleUpdateLeadStage = async (id: string, stage: Lead["stage"]) => {
+  const handleUpdateLeadStage = async (id: string, stage: Lead["stage"], assignedAgent?: string) => {
     try {
+      const body: any = { stage };
+      if (assignedAgent !== undefined) {
+        body.assignedAgent = assignedAgent;
+        body.assignedTo = assignedAgent;
+      }
       const response = await fetch(`/api/leads/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ stage })
+        body: JSON.stringify(body)
       });
       const data = await response.json();
       if (data.success) {
@@ -145,6 +171,22 @@ export default function App() {
       }
     } catch (err) {
       console.error("Failed to delete lead records:", err);
+    }
+  };
+
+  const handleAddActivity = async (type: "lead" | "email" | "deal" | "task" | "system", message: string) => {
+    try {
+      const response = await fetch("/api/activities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, message })
+      });
+      const data = await response.json();
+      if (data.success) {
+        setActivities(data.activities);
+      }
+    } catch (err) {
+      console.error("Failed to add activity record:", err);
     }
   };
 
@@ -282,6 +324,7 @@ export default function App() {
             onNavigate={setActiveTab} 
             globalSearchQuery={globalSearchQuery}
             onClearGlobalSearch={() => setGlobalSearchQuery("")}
+            maintenanceStatus={maintenanceStatus}
           />
         );
       case "leads":
@@ -295,6 +338,8 @@ export default function App() {
             onBulkDelete={handleBulkDelete}
             onTriggerMockCapture={handleTriggerMockCapture} 
             globalSearchQuery={globalSearchQuery}
+            onAddActivity={handleAddActivity}
+            activities={activities}
           />
         );
       case "marketing":
@@ -304,6 +349,7 @@ export default function App() {
             onToggleCampaign={handleToggleCampaign} 
             onSyncCampaigns={handleSyncAdData} 
             globalSearchQuery={globalSearchQuery}
+            onAddActivity={handleAddActivity}
           />
         );
       case "automation":

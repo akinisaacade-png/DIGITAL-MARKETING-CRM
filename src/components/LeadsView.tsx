@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { 
   Plus, 
   Search, 
@@ -15,9 +15,15 @@ import {
   CheckCircle,
   XCircle,
   Clock,
-  Flame
+  Flame,
+  Download,
+  Mic,
+  MicOff,
+  X,
+  Volume2,
+  Activity as ActivityIcon
 } from "lucide-react";
-import { Lead } from "../types";
+import { Lead, Agent, Activity } from "../types";
 
 // Dynamic SVG-based mini sparkline component for 30-day score history visualization
 const LeadScoreSparkline = ({ score, id }: { score: number; id: string }) => {
@@ -138,12 +144,14 @@ const LeadUrgencyBadge = ({ score, createdTime, stage }: { score: number; create
 interface LeadsViewProps {
   leads: Lead[];
   onAddLead: (leadData: Partial<Lead>) => void;
-  onUpdateLeadStage: (id: string, stage: Lead["stage"]) => void;
+  onUpdateLeadStage: (id: string, stage: Lead["stage"], assignedAgent?: string) => void;
   onDeleteLead: (id: string) => void;
   onBulkUpdateStage?: (ids: string[], stage: Lead["stage"]) => void;
   onBulkDelete?: (ids: string[]) => void;
   onTriggerMockCapture: () => void;
   globalSearchQuery?: string;
+  onAddActivity?: (type: "lead" | "email" | "deal" | "task" | "system", message: string) => void;
+  activities?: Activity[];
 }
 
 export default function LeadsView({ 
@@ -154,15 +162,116 @@ export default function LeadsView({
   onBulkUpdateStage,
   onBulkDelete,
   onTriggerMockCapture, 
-  globalSearchQuery = "" 
+  globalSearchQuery = "",
+  onAddActivity,
+  activities = []
 }: LeadsViewProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedStage, setSelectedStage] = useState<string>("All");
   const [selectedSource, setSelectedSource] = useState<string>("All");
   const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+
+  useEffect(() => {
+    const fetchAgents = async () => {
+      try {
+        const res = await fetch("/api/settings/agents");
+        const data = await res.json();
+        if (data.success) {
+          setAgents(data.agents);
+        }
+      } catch (err) {
+        console.error("Failed to load agents in LeadsView:", err);
+      }
+    };
+    fetchAgents();
+  }, []);
   
   // New lead form modal states
   const [showAddModal, setShowAddModal] = useState(false);
+  const [selectedLeadForDetail, setSelectedLeadForDetail] = useState<Lead | null>(null);
+  
+  // Web Speech Recognition state & handlers
+  const [isListening, setIsListening] = useState(false);
+  const [spokenNoteText, setSpokenNoteText] = useState("");
+  const [recognitionError, setRecognitionError] = useState("");
+
+  const startSpeechToText = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setRecognitionError("Web Speech API is not supported in this browser. Please use Google Chrome or Safari.");
+      return;
+    }
+
+    try {
+      const rec = new SpeechRecognition();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = "en-US";
+
+      rec.onstart = () => {
+        setIsListening(true);
+        setRecognitionError("");
+      };
+
+      rec.onresult = (event: any) => {
+        let finalTranscript = "";
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript + " ";
+          }
+        }
+        if (finalTranscript) {
+          setSpokenNoteText(prev => prev ? prev + " " + finalTranscript : finalTranscript);
+        }
+      };
+
+      rec.onerror = (e: any) => {
+        console.error("Speech recognition error:", e);
+        if (e.error === "not-allowed") {
+          setRecognitionError("Microphone access denied. Please allow microphone permission in browser settings.");
+        } else {
+          setRecognitionError("Failed to record audio notes: " + (e.error || "unknown error"));
+        }
+        setIsListening(false);
+      };
+
+      rec.onend = () => {
+        setIsListening(false);
+      };
+
+      (window as any)._activeRecognition = rec;
+      rec.start();
+    } catch (err: any) {
+      console.error("Failed to start speech recognition:", err);
+      setRecognitionError("Speech initiation error.");
+      setIsListening(false);
+    }
+  };
+
+  const stopSpeechToText = () => {
+    if ((window as any)._activeRecognition) {
+      try {
+        (window as any)._activeRecognition.stop();
+      } catch (err) {
+        console.error("Error stopping recognition:", err);
+      }
+    }
+    setIsListening(false);
+  };
+
+  const handleSaveSpokenNote = () => {
+    if (!selectedLeadForDetail || !spokenNoteText.trim()) return;
+    
+    if (onAddActivity) {
+      onAddActivity(
+        "lead", 
+        `🎙️ Voice note recorded for ${selectedLeadForDetail.name}: "${spokenNoteText.trim()}"`
+      );
+    }
+    setSpokenNoteText("");
+  };
+
   const [newLeadForm, setNewLeadForm] = useState({
     name: "",
     email: "",
@@ -186,6 +295,42 @@ export default function LeadsView({
 
     return matchesSearch && matchesStage && matchesSource;
   });
+
+  const handleExportCSV = () => {
+    // 1. Define columns to export
+    const headers = ["ID", "Name", "Email", "Company", "Source", "Pipeline Stage", "Value ($)", "Priority Score", "Assigned Agent", "Created At"];
+    
+    // 2. Map filtered leads into rows
+    const rows = filteredLeads.map(lead => [
+      lead.id,
+      `"${lead.name.replace(/"/g, '""')}"`,
+      `"${lead.email.replace(/"/g, '""')}"`,
+      `"${lead.company.replace(/"/g, '""')}"`,
+      lead.source,
+      lead.stage,
+      lead.value,
+      lead.score,
+      lead.assignedAgent || "Unassigned",
+      lead.createdTime || "N/A"
+    ]);
+
+    // 3. Assemble CSV content with headers
+    const csvContent = [
+      headers.join(","),
+      ...rows.map(e => e.join(","))
+    ].join("\n");
+
+    // 4. Create browser download link
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `CRM_Leads_Report_${new Date().toISOString().slice(0, 10)}.csv`);
+    link.style.visibility = "hidden";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   const handleSubmitNewLead = (e: React.FormEvent) => {
     e.preventDefault();
@@ -243,6 +388,16 @@ export default function LeadsView({
           >
             <Sparkles size={13} className="text-indigo-600 animate-pulse" />
             Auto-Capture Simulate
+          </button>
+
+          <button 
+            id="export-leads-csv-btn"
+            onClick={handleExportCSV}
+            className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 hover:border-slate-300 rounded-lg shadow-2xs transition-colors cursor-pointer"
+            title="Download the currently filtered list of leads as a CSV spreadsheet."
+          >
+            <Download size={13} className="text-emerald-500" />
+            Export Filtered CSV ({filteredLeads.length})
           </button>
           
           <button 
@@ -492,14 +647,14 @@ export default function LeadsView({
                       />
                     </td>
 
-                    {/* Lead Info */}
-                    <td className="p-4">
+                    {/* Lead Info (Click to view details profile) */}
+                    <td className="p-4 cursor-pointer group" onClick={() => setSelectedLeadForDetail(lead)}>
                       <div className="flex items-center gap-3">
-                        <div className={`w-8 h-8 rounded-full ${lead.avatarColor || 'bg-indigo-500'} flex items-center justify-center text-white font-bold text-xs shadow-xs`}>
+                        <div className={`w-8 h-8 rounded-full ${lead.avatarColor || 'bg-indigo-500'} flex items-center justify-center text-white font-bold text-xs shadow-xs group-hover:scale-105 transition-transform`}>
                           {lead.name.split(" ").map(n => n[0]).join("")}
                         </div>
                         <div>
-                          <span className="font-bold text-slate-800 text-xs block">{lead.name}</span>
+                          <span className="font-bold text-slate-800 text-xs block group-hover:text-indigo-600 group-hover:underline transition-colors">{lead.name}</span>
                           <span className="text-[11px] text-slate-400 font-mono block">{lead.email}</span>
                         </div>
                       </div>
@@ -571,13 +726,38 @@ export default function LeadsView({
 
                     {/* Owner / Assignee */}
                     <td className="p-4">
-                      <div className="flex items-center gap-1.5" id={`lead-assignee-${lead.id}`}>
-                        <div className="w-5 h-5 rounded-full bg-slate-100 border border-slate-200 text-indigo-600 flex items-center justify-center font-bold text-[9px] uppercase shrink-0">
-                          {(lead.assignedTo || "Unassigned").charAt(0)}
-                        </div>
-                        <span className="text-[11px] font-semibold text-slate-700 truncate max-w-[100px]" title={lead.assignedTo || "Unassigned"}>
-                          {lead.assignedTo || "Unassigned"}
-                        </span>
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-2" id={`lead-assignee-${lead.id}`}>
+                        {/* Visual Badge showing current assigned agent */}
+                        {lead.assignedAgent && lead.assignedAgent !== "Unassigned" ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-indigo-50 border border-indigo-200/60 text-indigo-700 shadow-3xs shrink-0 select-none">
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
+                            {lead.assignedAgent}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-100 border border-slate-200 text-slate-400 shrink-0 select-none">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                            Unassigned
+                          </span>
+                        )}
+
+                        {/* Quick-Assign Dropdown Selector */}
+                        <select
+                          id={`quick-assign-${lead.id}`}
+                          value={lead.assignedAgent || lead.assignedTo || "Unassigned"}
+                          onChange={(e) => {
+                            const newAgentVal = e.target.value;
+                            onUpdateLeadStage(lead.id, lead.stage, newAgentVal);
+                          }}
+                          className="text-[10px] font-semibold border border-slate-200 rounded-lg px-2 py-1 bg-white text-slate-600 outline-hidden focus:border-indigo-500 focus:ring-1 focus:ring-indigo-100 cursor-pointer max-w-[120px] transition-all"
+                          title="Assign to another sales agent"
+                        >
+                          <option value="Unassigned">Assign...</option>
+                          {agents.map((agent) => (
+                            <option key={agent.id} value={agent.name}>
+                              {agent.name}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                     </td>
 
@@ -727,6 +907,285 @@ export default function LeadsView({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- LEAD DETAIL & PROFILE MODAL (WITH WEB SPEECH VOICE NOTE CAPABILITY) --- */}
+      {selectedLeadForDetail && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white rounded-2xl max-w-4xl w-full shadow-2xl border border-slate-100 flex flex-col overflow-hidden max-h-[90vh] animate-slideUp">
+            
+            {/* Modal Header */}
+            <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start">
+              <div className="flex items-center gap-4">
+                <div className={`w-12 h-12 rounded-full ${selectedLeadForDetail.avatarColor || 'bg-indigo-500'} flex items-center justify-center text-white font-black text-lg shadow-sm`}>
+                  {selectedLeadForDetail.name.split(" ").map(n => n[0]).join("")}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-lg font-bold text-slate-900">{selectedLeadForDetail.name}</h2>
+                    <span className={`text-[10px] font-extrabold px-2.5 py-0.5 rounded-full ${
+                      selectedLeadForDetail.stage === 'Won' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' :
+                      selectedLeadForDetail.stage === 'Lost' ? 'bg-rose-50 text-rose-700 border border-rose-100' :
+                      selectedLeadForDetail.stage === 'Nurturing' ? 'bg-indigo-50 text-indigo-700 border border-indigo-100' :
+                      'bg-amber-50 text-amber-700 border border-amber-100'
+                    }`}>
+                      {selectedLeadForDetail.stage}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 font-mono mt-0.5">{selectedLeadForDetail.email}</p>
+                </div>
+              </div>
+
+              <button 
+                onClick={() => {
+                  stopSpeechToText();
+                  setSelectedLeadForDetail(null);
+                  setSpokenNoteText("");
+                  setRecognitionError("");
+                }}
+                className="p-1.5 hover:bg-slate-200/60 text-slate-400 hover:text-slate-600 rounded-lg transition-colors cursor-pointer"
+                title="Close modal"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 overflow-y-auto grid grid-cols-1 md:grid-cols-5 gap-6">
+              
+              {/* Left Column: Metadata Details (2/5 span) */}
+              <div className="md:col-span-2 space-y-5 border-r border-slate-100 pr-0 md:pr-6">
+                <div>
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-2">Core Pipeline Status</span>
+                  
+                  {/* Live Stage dropdown selector inside Detail view */}
+                  <div className="space-y-3 bg-slate-50 p-3 rounded-xl border border-slate-100">
+                    <div>
+                      <label className="text-[11px] text-slate-500 font-bold block mb-1">Pipeline Stage</label>
+                      <select
+                        value={selectedLeadForDetail.stage}
+                        onChange={(e) => {
+                          const newStage = e.target.value as Lead["stage"];
+                          onUpdateLeadStage(selectedLeadForDetail.id, newStage);
+                          setSelectedLeadForDetail({
+                            ...selectedLeadForDetail,
+                            stage: newStage
+                          });
+                          if (onAddActivity) {
+                            onAddActivity("lead", `🔄 Updated Lead ${selectedLeadForDetail.name} stage to ${newStage}`);
+                          }
+                        }}
+                        className="w-full text-xs font-semibold bg-white border border-slate-200 hover:border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500/10 cursor-pointer"
+                      >
+                        <option value="Lead Captured">Lead Captured</option>
+                        <option value="Contacted">Contacted</option>
+                        <option value="Demo Scheduled">Demo Scheduled</option>
+                        <option value="Proposal Sent">Proposal Sent</option>
+                        <option value="Nurturing">Nurturing</option>
+                        <option value="Won">Won</option>
+                        <option value="Lost">Lost</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-500 font-bold block mb-1">Assigned Executive</label>
+                      <select
+                        value={selectedLeadForDetail.assignedTo || selectedLeadForDetail.assignedAgent || ""}
+                        onChange={(e) => {
+                          const newAgent = e.target.value;
+                          onUpdateLeadStage(selectedLeadForDetail.id, selectedLeadForDetail.stage, newAgent);
+                          setSelectedLeadForDetail({
+                            ...selectedLeadForDetail,
+                            assignedTo: newAgent,
+                            assignedAgent: newAgent
+                          });
+                          if (onAddActivity) {
+                            onAddActivity("lead", `👤 Reassigned Lead ${selectedLeadForDetail.name} to agent ${newAgent || 'Unassigned'}`);
+                          }
+                        }}
+                        className="w-full text-xs bg-white border border-slate-200 hover:border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500/10 cursor-pointer"
+                      >
+                        <option value="">Unassigned</option>
+                        {agents.map(ag => (
+                          <option key={ag.id} value={ag.name}>{ag.name} ({ag.role})</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Lead Profiling</span>
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-slate-50/50 p-2.5 rounded-lg border border-slate-100">
+                      <span className="text-[10px] text-slate-400 font-semibold block">Company Name</span>
+                      <span className="text-xs font-bold text-slate-800 mt-0.5 flex items-center gap-1">
+                        <Building2 size={12} className="text-slate-400" />
+                        {selectedLeadForDetail.company}
+                      </span>
+                    </div>
+
+                    <div className="bg-slate-50/50 p-2.5 rounded-lg border border-slate-100">
+                      <span className="text-[10px] text-slate-400 font-semibold block">Traffic Source</span>
+                      <span className="text-xs font-bold text-indigo-700 mt-0.5">
+                        {selectedLeadForDetail.source}
+                      </span>
+                    </div>
+
+                    <div className="bg-slate-50/50 p-2.5 rounded-lg border border-slate-100">
+                      <span className="text-[10px] text-slate-400 font-semibold block">Estimated Contract</span>
+                      <span className="text-xs font-mono font-bold text-emerald-600 mt-0.5">
+                        ${Number(selectedLeadForDetail.value || 0).toLocaleString()}
+                      </span>
+                    </div>
+
+                    <div className="bg-slate-50/50 p-2.5 rounded-lg border border-slate-100">
+                      <span className="text-[10px] text-slate-400 font-semibold block">Priority Heat Score</span>
+                      <span className="text-xs font-mono font-bold text-rose-600 mt-0.5 flex items-center gap-1">
+                        <Flame size={12} className="text-rose-500 animate-pulse fill-rose-500/10" />
+                        {selectedLeadForDetail.score} / 100
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-50/50 p-3 rounded-xl border border-slate-100">
+                    <span className="text-[10px] text-slate-400 font-semibold block mb-1">Lead Health Sparkline Trend</span>
+                    <LeadScoreSparkline score={selectedLeadForDetail.score} id={selectedLeadForDetail.id} />
+                  </div>
+
+                  <div className="bg-slate-50/50 p-3 rounded-xl border border-slate-100 space-y-1">
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-slate-400 font-semibold">Acquisition Stage:</span>
+                      <span className="text-slate-700 font-bold">Consideration</span>
+                    </div>
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-slate-400 font-semibold">Added On:</span>
+                      <span className="text-slate-700 font-bold">{selectedLeadForDetail.createdTime || "Just now"}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Right Column: Interaction Hub, Speech to Text and Activity log (3/5 span) */}
+              <div className="md:col-span-3 space-y-5 flex flex-col">
+                
+                {/* Voice Note Module */}
+                <div className="bg-indigo-50/30 border border-indigo-100/50 rounded-xl p-4.5 space-y-3">
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 bg-indigo-500 rounded-full animate-ping" />
+                      <h4 className="text-xs font-extrabold text-indigo-900 tracking-wider uppercase">Lead Spoken Notes Dictation</h4>
+                    </div>
+                    {isListening && (
+                      <span className="text-[10px] bg-rose-600 text-white font-extrabold px-2.5 py-0.5 rounded-full flex items-center gap-1.5 animate-pulse">
+                        <span className="w-1.5 h-1.5 bg-white rounded-full animate-ping" />
+                        REC ON
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-slate-500 leading-normal">
+                    Dictate thoughts on this lead hands-free using your device's microphone. Your comments are compiled into structured log feed activities.
+                  </p>
+
+                  <div className="flex gap-2">
+                    {/* Record Button */}
+                    <button
+                      type="button"
+                      id="mic-record-notes-btn"
+                      onClick={isListening ? stopSpeechToText : startSpeechToText}
+                      className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all shadow-3xs flex items-center gap-2 cursor-pointer ${
+                        isListening 
+                          ? "bg-rose-500 hover:bg-rose-600 text-white animate-pulse" 
+                          : "bg-indigo-600 hover:bg-indigo-700 text-white"
+                      }`}
+                    >
+                      {isListening ? <MicOff size={14} className="animate-spin" /> : <Mic size={14} />}
+                      {isListening ? "Stop Listening" : "Record Audio Note"}
+                    </button>
+
+                    {spokenNoteText.trim() && (
+                      <button
+                        type="button"
+                        id="save-voice-note-btn"
+                        onClick={handleSaveSpokenNote}
+                        className="px-4 py-2.5 bg-slate-900 hover:bg-black text-white text-xs font-bold rounded-xl transition-colors shadow-3xs flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Volume2 size={14} />
+                        Save Voice Note
+                      </button>
+                    )}
+                  </div>
+
+                  {recognitionError && (
+                    <p className="text-[10px] text-rose-600 font-semibold bg-rose-50 px-2 py-1 rounded border border-rose-100">
+                      ⚠️ {recognitionError}
+                    </p>
+                  )}
+
+                  {/* Transcript Preview Card */}
+                  <div className="bg-white border border-indigo-100/30 rounded-lg p-3 min-h-[70px] relative">
+                    <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider absolute top-2 right-3">Live Transcript</span>
+                    {spokenNoteText ? (
+                      <p className="text-xs text-slate-800 leading-relaxed font-medium pr-14 mt-1">
+                        "{spokenNoteText}"
+                      </p>
+                    ) : (
+                      <p className="text-xs text-slate-400 italic mt-1 pr-14">
+                        {isListening ? "Listening... Speak clearly into your microphone." : "Microphone inactive. Click 'Record Audio Note' above to begin dictation."}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Filtered Lead Specific Timeline Feed */}
+                <div className="flex-1 flex flex-col min-h-[220px]">
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-2">Lead Communication History</span>
+                  
+                  <div className="border border-slate-100 rounded-xl overflow-hidden flex-1 bg-slate-50/30 flex flex-col">
+                    <div className="bg-slate-50 p-2.5 border-b border-slate-100 flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wide flex items-center gap-1">
+                        <ActivityIcon size={11} className="text-indigo-500" />
+                        Audit Trail Log ({activities.filter(act => act.message.toLowerCase().includes(selectedLeadForDetail.name.toLowerCase())).length})
+                      </span>
+                    </div>
+
+                    <div className="p-3 overflow-y-auto space-y-2.5 max-h-[200px]">
+                      {activities.filter(act => act.message.toLowerCase().includes(selectedLeadForDetail.name.toLowerCase())).length > 0 ? (
+                        activities
+                          .filter(act => act.message.toLowerCase().includes(selectedLeadForDetail.name.toLowerCase()))
+                          .map((act) => (
+                            <div key={act.id} className="bg-white border border-slate-100/50 p-2.5 rounded-lg shadow-4xs flex gap-2">
+                              <div className={`p-1 rounded-md h-fit ${
+                                act.type === "lead" ? "bg-indigo-50 text-indigo-600" :
+                                act.type === "system" ? "bg-amber-50 text-amber-600" : "bg-slate-100 text-slate-500"
+                              }`}>
+                                <ActivityIcon size={12} />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <p className="text-[11px] text-slate-700 leading-relaxed font-medium">{act.message}</p>
+                                <span className="text-[9px] font-mono text-slate-400 block mt-0.5">{act.timestamp}</span>
+                              </div>
+                            </div>
+                          ))
+                      ) : (
+                        <div className="flex flex-col items-center justify-center py-10 text-center">
+                          <ActivityIcon size={24} className="text-slate-300 stroke-[1.5]" />
+                          <p className="text-xs text-slate-400 font-medium mt-1.5">No historic activity logs found for this lead.</p>
+                          <p className="text-[10px] text-slate-400">Activities automatically register when status or voice notes are updated.</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+
+            </div>
+
           </div>
         </div>
       )}

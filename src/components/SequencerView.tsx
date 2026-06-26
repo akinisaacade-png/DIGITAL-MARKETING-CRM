@@ -31,6 +31,7 @@ export default function SequencerView({ sequences, onAddSequence, globalSearchQu
   });
 
   const [selectedSequenceId, setSelectedSequenceId] = useState<string>("");
+  const [activeStepIdx, setActiveStepIdx] = useState<number>(0);
   const [showAddForm, setShowAddForm] = useState(false);
 
   // Preview modal state
@@ -66,6 +67,7 @@ export default function SequencerView({ sequences, onAddSequence, globalSearchQu
 
   // Sync selectedSequenceId if it becomes empty or invalid
   const activeSeq = filteredSequences.find(s => s.id === selectedSequenceId) || filteredSequences[0];
+  const currentStep = activeSeq && activeSeq.steps ? (activeSeq.steps[activeStepIdx] || activeSeq.steps[0]) : null;
 
   const handleAddManualStep = () => {
     setManualSteps([
@@ -258,11 +260,11 @@ export default function SequencerView({ sequences, onAddSequence, globalSearchQu
             ))}
           </div>
 
-          {/* Right Panel: Selected Sequence Details */}
+          {/* Right Panel: Selected Sequence Details with Side-by-Side Live Preview */}
           <div className="lg:col-span-2 space-y-4" id="sequence-details-column">
             {activeSeq ? (
               <div className="bg-white border border-slate-100 rounded-xl p-6 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-slate-50 pb-4">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-4">
                   <div>
                     <h3 className="text-base font-extrabold text-slate-900">{activeSeq.name}</h3>
                     <p className="text-xs text-slate-400 mt-1">Trigger: <strong className="text-slate-700">{activeSeq.trigger}</strong></p>
@@ -272,51 +274,157 @@ export default function SequencerView({ sequences, onAddSequence, globalSearchQu
                   </span>
                 </div>
 
-                <div className="space-y-6 mt-6" id="sequence-steps-list">
-                  {activeSeq.steps.map((step, idx) => (
-                    <div key={idx} className="relative pl-6 border-l-2 border-dashed border-slate-100 last:border-0 pb-2">
-                      {/* Bullet step count node */}
-                      <div className="absolute -left-[11px] top-0.5 w-5 h-5 rounded-full bg-indigo-600 flex items-center justify-center text-white text-[10px] font-bold font-mono">
-                        {step.step}
-                      </div>
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mt-6">
+                  {/* Left side: Steps timeline */}
+                  <div className="space-y-4" id="sequence-steps-list">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Sequence Steps Timeline</span>
+                    {activeSeq.steps.map((step, idx) => {
+                      const isCurrentlyPreviewed = (activeStepIdx === idx) || (idx === 0 && !activeSeq.steps[activeStepIdx]);
+                      return (
+                        <div 
+                          key={idx} 
+                          onClick={() => setActiveStepIdx(idx)}
+                          className={`relative pl-6 border-l-2 border-dashed transition-all cursor-pointer last:border-0 pb-2 ${
+                            isCurrentlyPreviewed ? "border-indigo-500" : "border-slate-100"
+                          }`}
+                        >
+                          {/* Bullet step count node */}
+                          <div className={`absolute -left-[11px] top-0.5 w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold font-mono transition-colors ${
+                            isCurrentlyPreviewed ? "bg-indigo-600 ring-4 ring-indigo-50" : "bg-slate-400"
+                          }`}>
+                            {step.step}
+                          </div>
 
-                      <div className="bg-slate-50/50 border border-slate-100/50 rounded-xl p-4 space-y-3">
-                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-100/50 pb-2">
-                          <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                            <Mail size={12} className="text-indigo-500" />
-                            Subject: {step.subject}
-                          </span>
-                          <span className="text-[10px] font-semibold text-slate-400 bg-white border border-slate-100 px-2 py-0.5 rounded-md flex items-center gap-1">
-                            <Clock size={10} />
-                            Delay: {step.delay}
-                          </span>
+                          <div className={`border rounded-xl p-4 space-y-3 transition-all ${
+                            isCurrentlyPreviewed 
+                              ? "border-indigo-200 bg-indigo-50/10 shadow-3xs" 
+                              : "border-slate-100 bg-slate-50/50 hover:bg-slate-50 hover:border-slate-200"
+                          }`}>
+                            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-100/50 pb-2">
+                              <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5 truncate max-w-[170px]">
+                                <Mail size={12} className={isCurrentlyPreviewed ? "text-indigo-600" : "text-slate-400"} />
+                                Subject: {step.subject}
+                              </span>
+                              <span className="text-[9px] font-semibold text-slate-400 bg-white border border-slate-100 px-1.5 py-0.5 rounded-md flex items-center gap-0.5 shrink-0">
+                                <Clock size={9} />
+                                Delay: {step.delay}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-500 leading-relaxed line-clamp-3 whitespace-pre-wrap font-sans">
+                              {step.body}
+                            </p>
+                            <div className="flex justify-between items-center pt-2 border-t border-slate-100/50 text-[10px] font-medium text-indigo-600">
+                              <span className={isCurrentlyPreviewed ? "text-indigo-600 font-extrabold" : "text-slate-400"}>
+                                {isCurrentlyPreviewed ? "⚡ Live Rendering..." : "Click card to preview"}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedStepForPreview({
+                                    step: step.step,
+                                    subject: step.subject,
+                                    delay: step.delay,
+                                    body: step.body
+                                  });
+                                  setShowPreviewModal(true);
+                                }}
+                                className="text-[10px] font-bold text-indigo-500 hover:text-indigo-800 transition-colors inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <BookOpen size={10} />
+                                Fullscreen
+                              </button>
+                            </div>
+                          </div>
                         </div>
-                        <p className="text-xs text-slate-500 leading-relaxed whitespace-pre-wrap font-sans">
-                          {step.body}
-                        </p>
+                      );
+                    })}
+                  </div>
 
-                        <div className="flex justify-end pt-2 border-t border-slate-100/50">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedStepForPreview({
-                                step: step.step,
-                                subject: step.subject,
-                                delay: step.delay,
-                                body: step.body
-                              });
-                              setShowPreviewModal(true);
-                            }}
-                            className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 transition-colors inline-flex items-center gap-1 cursor-pointer hover:underline"
-                          >
-                            <BookOpen size={12} />
-                            Preview Rendered Step
-                          </button>
-                        </div>
+                  {/* Right side: Live Side-by-Side Email Preview Sandbox */}
+                  <div className="bg-slate-50/80 border border-slate-100 rounded-2xl p-4 flex flex-col h-[520px]" id="live-side-preview">
+                    <div className="flex items-center justify-between border-b border-slate-200/60 pb-3 mb-3 shrink-0">
+                      <div className="flex items-center gap-1.5">
+                        <Sparkles size={13} className="text-indigo-600 animate-pulse" />
+                        <h4 className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">Dynamic Lead Render</h4>
                       </div>
+                      
+                      {/* Lead Picker Dropdown */}
+                      <select
+                        value={previewLead.email}
+                        onChange={(e) => {
+                          const leadObj = mockLeads.find(l => l.email === e.target.value);
+                          if (leadObj) setPreviewLead(leadObj);
+                        }}
+                        className="text-[10px] font-extrabold border border-slate-200 rounded-lg px-2 py-1 bg-white text-slate-600 cursor-pointer outline-hidden hover:border-indigo-300 transition-colors shadow-3xs"
+                      >
+                        {mockLeads.map((lead, i) => (
+                          <option key={i} value={lead.email}>
+                            Simulate: {lead.firstName} ({lead.company})
+                          </option>
+                        ))}
+                      </select>
                     </div>
-                  ))}
+
+                    {currentStep ? (
+                      <div className="flex-1 flex flex-col min-h-0 bg-white border border-slate-100 rounded-xl overflow-hidden shadow-2xs">
+                        {/* Fake Sandbox Browser bar */}
+                        <div className="bg-slate-900 text-slate-400 text-[10px] font-mono px-3 py-2 flex items-center justify-between shrink-0 select-none">
+                          <span className="flex items-center gap-1 text-[9px] text-indigo-400 font-bold">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block animate-ping mr-1" />
+                            Email Preview Sandbox
+                          </span>
+                          <span className="text-slate-500 font-mono">Step {currentStep.step}</span>
+                        </div>
+
+                        {/* Mail Meta Header */}
+                        <div className="p-3 border-b border-slate-100 bg-slate-50/50 text-[11px] space-y-1.5 text-slate-600 shrink-0">
+                          <div className="flex items-center gap-1">
+                            <span className="font-mono text-[9px] text-slate-400 uppercase w-12 shrink-0">To:</span>
+                            <span className="font-bold text-slate-800 truncate">{previewLead.firstName} {previewLead.lastName}</span>{" "}
+                            <span className="text-indigo-600 bg-indigo-50/70 border border-indigo-100/50 px-1.5 py-0.5 rounded font-mono text-[9px] truncate max-w-[150px]">&lt;{previewLead.email}&gt;</span>
+                          </div>
+                          <div className="flex items-start gap-1">
+                            <span className="font-mono text-[9px] text-slate-400 uppercase w-12 shrink-0 mt-0.5">Subject:</span>
+                            <span className="font-bold text-slate-900 leading-tight">
+                              {currentStep.subject
+                                .replace(/\[First Name\]/g, previewLead.firstName)
+                                .replace(/\[First_Name\]/g, previewLead.firstName)
+                                .replace(/\[FirstName\]/g, previewLead.firstName)
+                                .replace(/\[Company\]/g, previewLead.company)
+                                .replace(/\[Company Name\]/g, previewLead.company)
+                                .replace(/\[Email\]/g, previewLead.email)}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Mail rendered text */}
+                        <div className="flex-1 p-3 overflow-y-auto bg-slate-50/30">
+                          <div className="bg-white border border-slate-100 rounded-lg p-3.5 h-full text-[11px] text-slate-700 leading-relaxed font-sans whitespace-pre-wrap overflow-y-auto">
+                            {currentStep.body
+                              .replace(/\[First Name\]/g, previewLead.firstName)
+                              .replace(/\[First_Name\]/g, previewLead.firstName)
+                              .replace(/\[FirstName\]/g, previewLead.firstName)
+                              .replace(/\[Company\]/g, previewLead.company)
+                              .replace(/\[Company Name\]/g, previewLead.company)
+                              .replace(/\[Email\]/g, previewLead.email)}
+                          </div>
+                        </div>
+
+                        {/* Dynamic Placeholders Legend */}
+                        <div className="px-3 py-1.5 bg-slate-100 border-t border-slate-200 text-[9px] text-slate-400 flex items-center justify-between shrink-0 font-mono select-none">
+                          <span className="truncate">Merged: [First Name], [Company]</span>
+                          <span className="text-emerald-600 font-black shrink-0">● Compiled</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex-1 flex items-center justify-center text-slate-400 italic text-xs">
+                        No steps found in this sequence.
+                      </div>
+                    )}
+                  </div>
                 </div>
+
               </div>
             ) : (
               <div className="bg-white border border-slate-100 rounded-xl p-12 text-center text-slate-400 text-xs">

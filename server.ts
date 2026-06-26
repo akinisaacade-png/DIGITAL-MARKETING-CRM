@@ -83,6 +83,7 @@ interface Lead {
   createdTime: string;
   avatarColor: string;
   assignedTo?: string;
+  assignedAgent?: string;
 }
 
 interface AssignmentRule {
@@ -92,12 +93,28 @@ interface AssignmentRule {
   isActive: boolean;
 }
 
+interface Agent {
+  id: string;
+  name: string;
+  role: string;
+  isActive: boolean;
+}
+
 let assignmentRules: AssignmentRule[] = [
   { id: "rule-1", source: "Website", assigneeName: "Alex Mercer", isActive: true },
   { id: "rule-2", source: "Facebook", assigneeName: "Sarah Connor", isActive: true },
   { id: "rule-3", source: "Instagram", assigneeName: "Marcus Wright", isActive: true },
   { id: "rule-4", source: "Google Ads", assigneeName: "Elena Rostova", isActive: true },
   { id: "rule-5", source: "Referrals", assigneeName: "Chloe Frazier", isActive: true }
+];
+
+let agents: Agent[] = [
+  { id: "agent-1", name: "Alex Mercer", role: "Growth Specialist", isActive: true },
+  { id: "agent-2", name: "Sarah Connor", role: "Inbound SDR", isActive: true },
+  { id: "agent-3", name: "Marcus Wright", role: "Key Accounts Lead", isActive: true },
+  { id: "agent-4", name: "Elena Rostova", role: "Enterprise Representative", isActive: true },
+  { id: "agent-5", name: "David Kim", role: "Digital Ad Strategist", isActive: true },
+  { id: "agent-6", name: "Chloe Frazier", role: "Customer Success / Default Intake", isActive: true }
 ];
 
 interface Campaign {
@@ -201,16 +218,30 @@ let maintenanceAgentStatus = {
 // --- FIREBASE HELPER FUNCTIONS ---
 
 async function getFbLeads(): Promise<Lead[]> {
-  if (!firebaseEnabled || !db) return leads;
+  if (!firebaseEnabled || !db) {
+    return leads.map(l => ({
+      ...l,
+      assignedAgent: l.assignedAgent || l.assignedTo
+    }));
+  }
   try {
     const snap = await getDocs(collection(db, "leads"));
     const fbLeads: Lead[] = [];
-    snap.forEach(d => fbLeads.push(d.data() as Lead));
+    snap.forEach(d => {
+      const data = d.data() as Lead;
+      fbLeads.push({
+        ...data,
+        assignedAgent: data.assignedAgent || data.assignedTo
+      });
+    });
     fbLeads.sort((a, b) => b.id.localeCompare(a.id));
     return fbLeads;
   } catch (e) {
     console.error("Firebase getFbLeads error:", e);
-    return leads;
+    return leads.map(l => ({
+      ...l,
+      assignedAgent: l.assignedAgent || l.assignedTo
+    }));
   }
 }
 
@@ -224,6 +255,26 @@ async function getFbRules(): Promise<AssignmentRule[]> {
   } catch (e) {
     console.error("Firebase getFbRules error:", e);
     return assignmentRules;
+  }
+}
+
+async function getFbAgents(): Promise<Agent[]> {
+  if (!firebaseEnabled || !db) return agents;
+  try {
+    const snap = await getDocs(collection(db, "agents"));
+    const fbAgents: Agent[] = [];
+    snap.forEach(d => fbAgents.push(d.data() as Agent));
+    if (fbAgents.length === 0) {
+      // Seed initial agents to firestore if empty
+      for (const a of agents) {
+        await setDoc(doc(db, "agents", a.id), a);
+      }
+      return agents;
+    }
+    return fbAgents;
+  } catch (e) {
+    console.error("Firebase getFbAgents error:", e);
+    return agents;
   }
 }
 
@@ -329,6 +380,25 @@ async function deleteFbRule(id: string) {
   await deleteDoc(doc(db, "assignmentRules", id));
 }
 
+async function saveFbAgent(agent: Agent) {
+  if (!firebaseEnabled || !db) {
+    const idx = agents.findIndex(a => a.id === agent.id);
+    if (idx !== -1) agents[idx] = agent;
+    else agents.push(agent);
+    return;
+  }
+  await setDoc(doc(db, "agents", agent.id), agent);
+}
+
+async function deleteFbAgent(id: string) {
+  if (!firebaseEnabled || !db) {
+    const idx = agents.findIndex(a => a.id === id);
+    if (idx !== -1) agents.splice(idx, 1);
+    return;
+  }
+  await deleteDoc(doc(db, "agents", id));
+}
+
 async function saveFbCampaign(camp: Campaign) {
   if (!firebaseEnabled || !db) {
     const idx = campaigns.findIndex(c => c.platform === camp.platform);
@@ -352,6 +422,66 @@ async function saveFbMaintenanceStatus(status: any) {
     return;
   }
   await setDoc(doc(db, "maintenance", "status"), status);
+}
+
+// Automated Lead Scoring Service
+function startLeadScoringService() {
+  console.log("Starting Automated Lead Scoring background service...");
+  
+  setInterval(async () => {
+    try {
+      const leadsList = await getFbLeads();
+      if (!leadsList || leadsList.length === 0) return;
+      
+      let updatedCount = 0;
+      for (const lead of leadsList) {
+        // Calculate priority heat score based on engagement & interaction:
+        // 1. Pipeline stage (higher stage -> higher interest/score)
+        let stageScore = 40; // Default for New
+        if (lead.stage === "Contacted") stageScore = 55;
+        else if (lead.stage === "Qualified") stageScore = 75;
+        else if (lead.stage === "Proposal") stageScore = 88;
+        else if (lead.stage === "Won") stageScore = 100;
+        else if (lead.stage === "Lost") stageScore = 15;
+
+        // 2. Lead Source (referrals and search ads are higher intent)
+        let sourceBonus = 0;
+        if (lead.source === "Referrals") sourceBonus = 12;
+        else if (lead.source === "Google Ads") sourceBonus = 8;
+        else if (lead.source === "Website") sourceBonus = 5;
+        else if (lead.source === "Facebook") sourceBonus = 2;
+        else if (lead.source === "Instagram") sourceBonus = 1;
+
+        // 3. Lead value (higher value lead is higher priority)
+        const valueBonus = Math.min(15, Math.floor((lead.value || 0) / 1500));
+
+        // 4. Dynamic engagement fluctuation to represent live clicks/page views
+        const engagementFluctuation = Math.floor(Math.random() * 5) - 2; // -2 to +2
+
+        const rawScore = stageScore + sourceBonus + valueBonus + engagementFluctuation;
+        const finalScore = Math.max(1, Math.min(100, rawScore));
+
+        if (lead.score !== finalScore) {
+          lead.score = finalScore;
+          await saveFbLead(lead);
+          updatedCount++;
+          
+          // Add activity log in the background occasionally
+          if (Math.random() < 0.25) {
+            const newAct = {
+              id: `ACT-AUTO-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+              type: "system" as const,
+              message: `AI Lead Scorer recalculated ${lead.name}'s priority heat score to ${finalScore} (${finalScore > 80 ? 'High Heat 🔥' : finalScore > 50 ? 'Warm' : 'Cold'})`,
+              timestamp: "Just now"
+            };
+            await saveFbActivity(newAct);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Error in background automated lead scoring service:", err);
+    }
+  }, 15000); // run every 15 seconds
 }
 
 // Seed function
@@ -467,7 +597,8 @@ app.post("/api/leads", async (req, res) => {
       value: Number(value) || 0,
       createdTime: "Just now",
       avatarColor: ["bg-blue-500", "bg-purple-500", "bg-pink-500", "bg-emerald-500", "bg-indigo-500", "bg-teal-500"][Math.floor(Math.random() * 6)],
-      assignedTo: finalAssignedTo
+      assignedTo: finalAssignedTo,
+      assignedAgent: finalAssignedTo
     };
 
     await saveFbLead(newLead);
@@ -492,7 +623,7 @@ app.post("/api/leads", async (req, res) => {
 
 app.put("/api/leads/:id", async (req, res) => {
   const { id } = req.params;
-  const { stage, score, value, assignedTo } = req.body;
+  const { stage, score, value, assignedTo, assignedAgent } = req.body;
 
   try {
     const currentLeads = await getFbLeads();
@@ -505,7 +636,16 @@ app.put("/api/leads/:id", async (req, res) => {
     if (stage) targetLead.stage = stage;
     if (score !== undefined) targetLead.score = Number(score);
     if (value !== undefined) targetLead.value = Number(value);
-    if (assignedTo !== undefined) targetLead.assignedTo = assignedTo;
+    
+    // Sync both fields
+    if (assignedTo !== undefined) {
+      targetLead.assignedTo = assignedTo;
+      targetLead.assignedAgent = assignedTo;
+    }
+    if (assignedAgent !== undefined) {
+      targetLead.assignedAgent = assignedAgent;
+      targetLead.assignedTo = assignedAgent;
+    }
 
     await saveFbLead(targetLead);
 
@@ -706,6 +846,81 @@ app.delete("/api/settings/rules/:id", async (req, res) => {
   }
 });
 
+// --- ENDPOINTS FOR ASSIGNED AGENTS (SETTINGS) ---
+
+app.get("/api/settings/agents", async (req, res) => {
+  try {
+    const currentAgents = await getFbAgents();
+    res.json({ success: true, agents: currentAgents });
+  } catch (err) {
+    console.error("Failed to load setting agents:", err);
+    res.json({ success: true, agents });
+  }
+});
+
+app.post("/api/settings/agents", async (req, res) => {
+  const { name, role, isActive } = req.body;
+  if (!name || !role) {
+    return res.status(400).json({ success: false, error: "Name and Role are required." });
+  }
+
+  try {
+    const newAgent: Agent = {
+      id: `agent-${Date.now()}`,
+      name,
+      role,
+      isActive: isActive !== undefined ? isActive : true
+    };
+
+    await saveFbAgent(newAgent);
+
+    // Create activity log
+    const actId = `ACT-${Date.now()}`;
+    const newAct: Activity = {
+      id: actId,
+      type: "system",
+      message: `New Agent Added to CRM Roster: ${name} (${role})`,
+      timestamp: "Just now"
+    };
+    await saveFbActivity(newAct);
+
+    const refreshedAgents = await getFbAgents();
+    res.json({ success: true, agents: refreshedAgents });
+  } catch (err) {
+    console.error("Failed to save setting agent:", err);
+    res.status(500).json({ success: false, error: "Failed to save agent" });
+  }
+});
+
+app.delete("/api/settings/agents/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const currentAgents = await getFbAgents();
+    const targetAgent = currentAgents.find(a => a.id === id);
+    if (!targetAgent) {
+      return res.status(404).json({ success: false, error: "Agent not found" });
+    }
+
+    await deleteFbAgent(id);
+
+    // Create activity log
+    const actId = `ACT-${Date.now()}`;
+    const newAct: Activity = {
+      id: actId,
+      type: "system",
+      message: `Agent Removed from CRM Roster: ${targetAgent.name}`,
+      timestamp: "Just now"
+    };
+    await saveFbActivity(newAct);
+
+    const refreshedAgents = await getFbAgents();
+    res.json({ success: true, agents: refreshedAgents });
+  } catch (err) {
+    console.error("Failed to delete setting agent:", err);
+    res.status(500).json({ success: false, error: "Failed to delete agent" });
+  }
+});
+
 // --- ENDPOINTS FOR CAMPAIGNS & INTEGRATIONS ---
 
 app.get("/api/campaigns", async (req, res) => {
@@ -819,6 +1034,25 @@ app.get("/api/activities", async (req, res) => {
   } catch (err) {
     console.error("Failed to load activities:", err);
     res.json({ success: true, activities });
+  }
+});
+
+app.post("/api/activities", async (req, res) => {
+  const { type, message } = req.body;
+  try {
+    const actId = `ACT-${Date.now()}`;
+    const newAct: Activity = {
+      id: actId,
+      type: type || "system",
+      message: message || "",
+      timestamp: "Just now"
+    };
+    await saveFbActivity(newAct);
+    const refreshedActs = await getFbActivities();
+    res.json({ success: true, activities: refreshedActs });
+  } catch (err) {
+    console.error("Failed to save activity:", err);
+    res.status(500).json({ success: false, error: "Failed to save activity" });
   }
 });
 
@@ -2029,6 +2263,9 @@ ${cleanedInput}
 async function startServer() {
   // Check and seed the database if Firestore is active and collections are empty
   await seedDatabaseIfEmpty();
+
+  // Start automated background lead scoring
+  startLeadScoringService();
 
   if (process.env.NODE_ENV !== "production") {
     console.log("Setting up Vite middleware for development...");
