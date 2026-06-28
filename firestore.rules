@@ -100,6 +100,17 @@ service cloud.firestore {
         && data.isActive is bool;
     }
 
+    // 8. User Profile Schema Validation
+    function isValidUser(data) {
+      return data.keys().hasAll(['name', 'email', 'subscriptionTier', 'subscriptionExpires', 'subscriptionAt'])
+        && data.keys().size() == 5
+        && data.name is string && data.name.size() <= 128
+        && data.email is string && data.email.size() <= 128
+        && data.subscriptionTier is string && data.subscriptionTier in ['free_trial', 'monthly', 'yearly', 'none']
+        && data.subscriptionExpires is string && data.subscriptionExpires.size() <= 64
+        && data.subscriptionAt is string && data.subscriptionAt.size() <= 64;
+    }
+
     // --- SECURED COLLECTIONS ---
 
     // Leads Collection
@@ -149,6 +160,13 @@ service cloud.firestore {
       allow read: if true;
       allow create, update: if isValidId(agentId) && isValidAgent(request.resource.data);
       allow delete: if isValidId(agentId);
+    }
+
+    // Users Profile Collection
+    match /users/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow create, update: if request.auth != null && request.auth.uid == userId && isValidId(userId) && isValidUser(request.resource.data);
+      allow delete: if request.auth != null && request.auth.uid == userId && isValidId(userId);
     }
   }
 }

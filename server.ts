@@ -101,9 +101,9 @@ async function acquireRateLimitToken(): Promise<void> {
  */
 async function callWithRetry<T>(
   fn: () => Promise<T>,
-  maxAttempts: number = 5,
-  minDelayMs: number = 1000,
-  maxDelayMs: number = 60000
+  maxAttempts: number = 7,
+  minDelayMs: number = 2000,
+  maxDelayMs: number = 90000
 ): Promise<T> {
   // Acquire a rate limit token before executing the GenAI call
   await acquireRateLimitToken();
@@ -113,21 +113,41 @@ async function callWithRetry<T>(
     try {
       return await fn();
     } catch (error: any) {
-      const errString = String(error) + " " + JSON.stringify(error) + " " + (error?.message || "");
-      const isQuotaError = errString.includes("429") || 
-                           errString.includes("RESOURCE_EXHAUSTED") || 
-                           errString.includes("quota") || 
-                           error?.status === 429 || 
-                           error?.status === "RESOURCE_EXHAUSTED";
+      const errorStringified = JSON.stringify(error?.error || error || "");
+      const errorMsg = error?.message || "";
+      const errorStatus = error?.status || error?.error?.status || "";
+      const errorCode = error?.status || error?.error?.code || error?.statusCode || "";
+      const errCombinedString = `${String(error)} ${errorMsg} ${errorStatus} ${errorCode} ${errorStringified}`.toLowerCase();
+
+      const isQuotaError = errCombinedString.includes("429") || 
+                           errCombinedString.includes("resource_exhausted") || 
+                           errCombinedString.includes("quota") ||
+                           errorCode === 429 ||
+                           errorStatus === "RESOURCE_EXHAUSTED";
 
       if (isQuotaError && attempt < maxAttempts) {
-        // Exponential backoff with random jitter: delay = minDelay * 2^(attempt-1) + jitter
-        const exponentialDelay = minDelayMs * Math.pow(2, attempt - 1);
-        const maxJitter = minDelayMs * Math.pow(2, attempt);
-        const jitter = Math.random() * (maxJitter - exponentialDelay);
-        const calculatedDelay = Math.min(exponentialDelay + jitter, maxDelayMs);
+        // Try to parse recommended retry delay from API error response details (e.g. RetryInfo)
+        let calculatedDelay = 0;
+        const details = error?.error?.details || error?.details;
+        if (Array.isArray(details)) {
+          const retryInfo = details.find((d: any) => d["@type"]?.includes("RetryInfo"));
+          if (retryInfo && typeof retryInfo.retryDelay === "string") {
+            const seconds = parseFloat(retryInfo.retryDelay);
+            if (!isNaN(seconds)) {
+              calculatedDelay = (seconds + 1.5) * 1000; // Add 1.5s extra safety buffer
+            }
+          }
+        }
 
-        console.warn(`[Gemini Retry]: Quota exceeded (RESOURCE_EXHAUSTED / 429). Attempt ${attempt}/${maxAttempts}. Retrying in ${Math.round(calculatedDelay)}ms...`);
+        // Fallback to standard exponential backoff if no specific retry delay is requested by the API
+        if (calculatedDelay <= 0) {
+          const exponentialDelay = minDelayMs * Math.pow(2, attempt - 1);
+          const maxJitter = minDelayMs * Math.pow(2, attempt);
+          const jitter = Math.random() * (maxJitter - exponentialDelay);
+          calculatedDelay = Math.min(exponentialDelay + jitter, maxDelayMs);
+        }
+
+        console.warn(`[Gemini Retry]: Quota exceeded (RESOURCE_EXHAUSTED / 429). Attempt ${attempt}/${maxAttempts}. Sleeping for ${Math.round(calculatedDelay)}ms before retrying...`);
         await new Promise((resolve) => setTimeout(resolve, calculatedDelay));
         attempt++;
       } else {

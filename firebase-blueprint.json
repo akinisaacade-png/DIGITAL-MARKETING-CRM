@@ -100,6 +100,19 @@
         "isActive": { "type": "boolean" }
       },
       "required": ["id", "name", "role", "isActive"]
+    },
+    "User": {
+      "title": "User",
+      "description": "User profile with their subscription status and details.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "subscriptionTier": { "type": "string", "enum": ["free_trial", "monthly", "yearly", "none"] },
+        "subscriptionExpires": { "type": "string" },
+        "subscriptionAt": { "type": "string" }
+      },
+      "required": ["name", "email", "subscriptionTier", "subscriptionExpires", "subscriptionAt"]
     }
   },
   "firestore": {
@@ -130,6 +143,10 @@
     "agents": {
       "schema": "Agent",
       "description": "Roster of assigned sales agents who handle lead pipeline allocation"
+    },
+    "users/{userId}": {
+      "schema": "User",
+      "description": "Collection of user profile records with current subscription tiers"
     }
   }
 }

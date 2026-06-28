@@ -13,7 +13,8 @@ import {
   X,
   Sparkles,
   HelpCircle,
-  Search
+  Search,
+  CreditCard
 } from "lucide-react";
 
 import { Lead, Campaign, Activity, EmailSequence, MaintenanceStatus } from "./types";
@@ -26,6 +27,7 @@ import ChatbotView from "./components/ChatbotView";
 import MaintenanceView from "./components/MaintenanceView";
 import SettingsView from "./components/SettingsView";
 import OrchestratorView from "./components/OrchestratorView";
+import SubscriptionView from "./components/SubscriptionView";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>("dashboard");
@@ -372,6 +374,8 @@ export default function App() {
         return <MaintenanceView status={maintenanceStatus} onRunAgentAction={handleRunAgentAction} />;
       case "settings":
         return <SettingsView />;
+      case "subscription":
+        return <SubscriptionView />;
       default:
         return (
           <DashboardView 
@@ -445,6 +449,7 @@ export default function App() {
               { id: "chatbot", label: "AI CMO Assistant", icon: <Bot size={14} /> },
               { id: "maintenance", label: "Maintenance & Agent Logs", icon: <Cpu size={14} /> },
               { id: "settings", label: "CRM Settings & Rules", icon: <Settings size={14} /> },
+              { id: "subscription", label: "Billing & Subscriptions", icon: <CreditCard size={14} /> },
             ].map((item) => (
               <button
                 key={item.id}
