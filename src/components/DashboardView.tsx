@@ -22,7 +22,8 @@ import {
   FileText,
   Award,
   Star,
-  X
+  X,
+  BarChart3
 } from "lucide-react";
 import { 
   ResponsiveContainer, 
@@ -35,7 +36,9 @@ import {
   PieChart, 
   Pie, 
   Cell, 
-  Legend 
+  Legend,
+  BarChart,
+  Bar
 } from "recharts";
 import { Lead, Campaign, Activity, MaintenanceStatus } from "../types";
 
@@ -445,6 +448,124 @@ export default function DashboardView({
   const totalRevFromRoi = campaigns.reduce((acc, c) => acc + (c.spent * c.roi), 0);
   const avgRoi = totalSpent > 0 ? (totalRevFromRoi / totalSpent) : 3.8;
 
+  // Calculates conversion rate vs lead value comparison dataset for Recharts Bar Chart
+  const channelMetricsData = campaigns.map(c => {
+    const conversionRate = c.clicks > 0 ? Number(((c.conversions / c.clicks) * 100).toFixed(2)) : 0;
+    const matchingLeads = leads.filter(l => {
+      const src = (l.source || "").toLowerCase();
+      const platform = c.platform.toLowerCase();
+      return src === platform || 
+             src.startsWith(platform) || 
+             platform.startsWith(src) ||
+             (platform === "facebook" && src.includes("facebook")) ||
+             (platform === "instagram" && src.includes("instagram"));
+    });
+    const totalLeadValue = matchingLeads.reduce((sum, l) => sum + l.value, 0);
+    return {
+      platform: c.platform,
+      conversionRate,
+      totalLeadValue,
+    };
+  });
+
+  const handleExportJSON = () => {
+    try {
+      const totalLeads = leads.length;
+      const activeOppsCount = leads.filter(l => l.stage !== "Won" && l.stage !== "Lost").length;
+      const wonLeadsCount = leads.filter(l => l.stage === "Won").length;
+      const lostLeadsCount = leads.filter(l => l.stage === "Lost").length;
+      const totalPipelineValue = leads.filter(l => l.stage !== "Won" && l.stage !== "Lost").reduce((s, l) => s + l.value, 0);
+      const wonRevenueValue = leads.filter(l => l.stage === "Won").reduce((s, l) => s + l.value, 0);
+      const averageLeadScore = totalLeads > 0 ? Number((leads.reduce((sum, l) => sum + l.score, 0) / totalLeads).toFixed(1)) : 0;
+
+      const channelsData = campaigns.map(c => {
+        const matchingLeads = leads.filter(l => {
+          const src = (l.source || "").toLowerCase();
+          const platform = c.platform.toLowerCase();
+          return src === platform || 
+                 src.startsWith(platform) || 
+                 platform.startsWith(src) ||
+                 (platform === "facebook" && src.includes("facebook")) ||
+                 (platform === "instagram" && src.includes("instagram"));
+        });
+
+        const conversionRate = c.clicks > 0 ? Number(((c.conversions / c.clicks) * 100).toFixed(2)) : 0;
+        const totalValue = matchingLeads.reduce((sum, l) => sum + l.value, 0);
+        const wonValue = matchingLeads.filter(l => l.stage === "Won").reduce((sum, l) => sum + l.value, 0);
+
+        return {
+          platform: c.platform,
+          status: c.status,
+          spend: c.spent,
+          clicks: c.clicks,
+          conversions: c.conversions,
+          conversionRatePercent: conversionRate,
+          roiMultiplier: c.roi,
+          crmMatchedLeadsCount: matchingLeads.length,
+          crmTotalDealValue: totalValue,
+          crmWonRevenueValue: wonValue
+        };
+      });
+
+      const totalClicks = campaigns.reduce((s, c) => s + c.clicks, 0);
+      const totalConversions = campaigns.reduce((s, c) => s + c.conversions, 0);
+      const globalConversionRate = totalClicks > 0 ? Number(((totalConversions / totalClicks) * 100).toFixed(2)) : 0;
+      const topRevenueChannel = [...channelsData].sort((a, b) => b.crmWonRevenueValue - a.crmWonRevenueValue)[0]?.platform || "Website";
+
+      const reportPayload = {
+        reportName: "Weekly Marketing & CRM Growth Performance Summary",
+        generatedAt: new Date().toISOString(),
+        metadata: {
+          system: "Digital Marketing CRM Pro AI Engine",
+          version: "2.1.0-JSON",
+          confidentiality: "INTERNAL_USE_ONLY"
+        },
+        pipelinePerformanceSummary: {
+          metrics: {
+            totalLeadsCount: totalLeads,
+            activeOpportunitiesCount: activeOppsCount,
+            wonLeadsCount: wonLeadsCount,
+            lostLeadsCount: lostLeadsCount,
+            averageLeadPipelineScore: averageLeadScore,
+            totalActivePipelineValueUSD: totalPipelineValue,
+            totalRevenueSecuredUSD: wonRevenueValue
+          },
+          context: `Your sales pipeline currently holds ${totalLeads} total prospects. Out of these, ${activeOppsCount} are actively engaged in negotiations, representing an active pipeline value of $${totalPipelineValue.toLocaleString()} in potential deals.`
+        },
+        adCampaignsPerformanceSummary: {
+          metrics: {
+            totalChannelsTracked: campaigns.length,
+            totalAdSpendUSD: totalSpent,
+            totalTrafficClicks: totalClicks,
+            totalConversions: totalConversions,
+            averageConversionRatePercent: globalConversionRate,
+            averageRoiMultiplier: Number(avgRoi.toFixed(2)),
+            primaryRevenueDriverChannel: topRevenueChannel
+          },
+          channelBreakdown: channelsData
+        },
+        strategicActionInsights: [
+          `Channel Lead Flow: ${topRevenueChannel} represents the highest closed won value in your active database. Invest more in optimizing its creative copy assets.`,
+          `Funnel Velocity: With a closed won lead volume of ${wonLeadsCount} deals, overall CRM pipeline close rate is stable.`,
+          `Budget efficiency check: Active advertising campaigns operate at a combined average ROI multiplier of ${avgRoi.toFixed(1)}x.`
+        ]
+      };
+
+      const jsonString = `data:text/json;charset=utf-8,${encodeURIComponent(JSON.stringify(reportPayload, null, 2))}`;
+      const downloadAnchor = document.createElement("a");
+      downloadAnchor.setAttribute("href", jsonString);
+      downloadAnchor.setAttribute("download", `Weekly_Performance_Report_${new Date().toISOString().split('T')[0]}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      document.body.removeChild(downloadAnchor);
+
+      showSuccessToast("Weekly Performance Report JSON downloaded successfully!");
+      setShowExportModal(false);
+    } catch (err) {
+      console.error("JSON Export failed:", err);
+    }
+  };
+
   // Let's create historical + projected trend data for Recharts
   // Upcoming month dates (July 2026 based on current time June 2026)
   const projectedRoiData = [
@@ -553,7 +674,7 @@ export default function DashboardView({
         <div className="flex items-center gap-2">
           <button 
             id="download-summary-report-btn"
-            onClick={handleExportPDF}
+            onClick={() => setShowExportModal(true)}
             className="flex items-center gap-1.5 text-xs font-bold px-3 py-2 text-white bg-indigo-600 border border-indigo-600 rounded-lg hover:bg-indigo-700 hover:border-indigo-700 transition-all cursor-pointer shadow-3xs"
           >
             <Download size={14} />
@@ -1092,6 +1213,69 @@ export default function DashboardView({
 
       </div>
 
+      {/* Lead Source Performance Comparison Bar Chart */}
+      <div className="bg-white border border-slate-100 rounded-xl p-6 shadow-sm" id="channel-performance-comparison-card">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-4 border-b border-slate-50 mb-6">
+          <div>
+            <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+              <BarChart3 size={16} className="text-indigo-600" />
+              Channel Performance: Lead Source Conversion vs. Pipeline Value
+            </h4>
+            <p className="text-xs text-slate-400 mt-1">
+              Comparing campaign click-to-lead conversion rates (left axis) with the total financial value of generated CRM leads (right axis) across channels.
+            </p>
+          </div>
+          <div className="flex gap-4 text-[11px] font-semibold">
+            <div className="flex items-center gap-1.5 text-indigo-600">
+              <span className="w-3 h-3 rounded-xs bg-indigo-500" />
+              <span>Conversion Rate (%)</span>
+            </div>
+            <div className="flex items-center gap-1.5 text-emerald-600">
+              <span className="w-3 h-3 rounded-xs bg-emerald-500" />
+              <span>Total Pipeline Value ($)</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="h-80 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={channelMetricsData} margin={{ top: 20, right: 30, left: 10, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+              <XAxis 
+                dataKey="platform" 
+                tickLine={false} 
+                axisLine={false} 
+                tick={{ fill: "#94a3b8", fontSize: 11 }}
+              />
+              <YAxis 
+                yAxisId="left"
+                tickLine={false} 
+                axisLine={false} 
+                tick={{ fill: "#94a3b8", fontSize: 11 }}
+                tickFormatter={(val) => `${val}%`}
+              />
+              <YAxis 
+                yAxisId="right"
+                orientation="right"
+                tickLine={false} 
+                axisLine={false} 
+                tick={{ fill: "#94a3b8", fontSize: 11 }}
+                tickFormatter={(val) => `$${(val / 1000)}k`}
+              />
+              <Tooltip 
+                contentStyle={{ background: "#1e293b", borderRadius: "10px", border: "none", color: "#fff", fontSize: "12px", padding: "10px" }}
+                formatter={(value: any, name: string) => {
+                  if (name === "conversionRate") return [`${value}%`, "Conversion Rate"];
+                  return [`$${value.toLocaleString()}`, "Total Pipeline Value"];
+                }}
+              />
+              <Bar yAxisId="left" dataKey="conversionRate" fill="#6366f1" radius={[4, 4, 0, 0]} maxBarSize={45} name="conversionRate" />
+              <Bar yAxisId="right" dataKey="totalLeadValue" fill="#10b981" radius={[4, 4, 0, 0]} maxBarSize={45} name="totalLeadValue" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
       {/* Distribution and Activities Row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6" id="distribution-and-activities-row">
         
@@ -1378,7 +1562,7 @@ export default function DashboardView({
             </div>
 
             {/* Export Format Selectors */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* CSV option */}
               <button
                 id="export-csv-action-card"
@@ -1417,6 +1601,27 @@ export default function DashboardView({
                   <span className="text-[10px] text-indigo-600 font-mono font-bold mt-2.5 block flex items-center gap-1">
                     <Printer size={10} />
                     Print / Save PDF
+                  </span>
+                </div>
+              </button>
+
+              {/* JSON option */}
+              <button
+                id="export-json-action-card"
+                onClick={handleExportJSON}
+                className="flex items-start gap-4 p-4 border border-slate-200 hover:border-amber-200 bg-white hover:bg-amber-50/20 rounded-xl text-left transition-all cursor-pointer group"
+              >
+                <div className="p-3 bg-amber-50 text-amber-600 rounded-lg group-hover:bg-amber-100 transition-all">
+                  <FileText size={22} className="text-amber-600" />
+                </div>
+                <div>
+                  <span className="text-xs font-bold text-slate-900 block">Weekly JSON Report</span>
+                  <span className="text-[11px] text-slate-500 block mt-1 leading-relaxed">
+                    Downloads an analytical, simulated JSON dataset containing complete KPI statistics, channel breakdowns, and diagnostic health checks.
+                  </span>
+                  <span className="text-[10px] text-amber-600 font-mono font-bold mt-2.5 block flex items-center gap-1">
+                    <Download size={10} />
+                    Download JSON Export
                   </span>
                 </div>
               </button>
