@@ -800,6 +800,90 @@ app.post(["/api/stripe/create-checkout-session", "/api/checkout"], async (req, r
   }
 });
 
+// API Endpoint triggered when user clicks "Create Account & Start Free Trial"
+app.post("/api/auth/register-and-subscribe", async (req, res) => {
+  const { name, email, password, planType } = req.body;
+
+  if (!name || !email) {
+    return res.status(400).json({ success: false, error: "Missing required fields: name and email" });
+  }
+
+  const activeTier = planType === "yearly" ? "yearly" : "monthly";
+
+  // Generate a unique user ID
+  const userId = "usr_" + Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
+  const expires = new Date();
+  expires.setDate(expires.getDate() + 7); // 7-day trial period as requested
+
+  const userPayload = {
+    id: userId,
+    name: String(name).trim(),
+    email: String(email).trim().toLowerCase(),
+    password: password ? String(password) : "",
+    subscriptionTier: activeTier,
+    subscriptionExpires: expires.toISOString(),
+    subscriptionAt: new Date().toISOString(),
+    createdAt: new Date().toISOString()
+  };
+
+  try {
+    // 1. Save the user to our CRM Database (Firestore)
+    if (db) {
+      await setDoc(doc(db, "users", userId), userPayload);
+      console.log(`[Registration] Saved new user ${email} to CRM Firestore database with ID ${userId}`);
+    } else {
+      console.warn("[Registration] Firestore database not initialized, proceeding with fallback registration.");
+    }
+
+    // 2. Map the plan type to the exact Stripe Price IDs
+    const priceId = activeTier === "yearly"
+      ? process.env.STRIPE_PRICE_ID_YEARLY || "price_1TnBfQBMbxh6jv0CFkCGyPdA"
+      : process.env.STRIPE_PRICE_ID_MONTHLY || "price_1TnBfPBMbxh6jv0C1UWWj9H7";
+
+    const appUrl = process.env.APP_URL || "http://localhost:3000";
+
+    // 3. Create Stripe Checkout Session (or simulate if keys are missing)
+    const stripeKey = process.env.STRIPE_SECRET_KEY;
+    if (!stripeKey || stripeKey.includes("...") || stripeKey === "sk_live_") {
+      console.warn("[Stripe] Stripe secret key not found or placeholder. Entering subscription simulation mode for registration.");
+      const mockSuccessUrl = `/api/stripe/mock-success?userId=${userId}&tier=${activeTier}`;
+      return res.status(201).json({
+        success: true,
+        url: mockSuccessUrl,
+        isSimulated: true
+      });
+    }
+
+    const stripe = getStripe();
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      payment_method_types: ["card"],
+      customer_email: String(email).trim().toLowerCase(),
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      subscription_data: {
+        trial_period_days: 7, // Adds the 7-day "Free Trial" aspect
+      },
+      success_url: `${appUrl}/dashboard?session_id={CHECKOUT_SESSION_ID}&status=success&tier=${activeTier}&planType=${activeTier}`,
+      cancel_url: `${appUrl}/signup?status=cancelled`,
+      client_reference_id: userId,
+      metadata: {
+        userId,
+        tier: activeTier
+      }
+    });
+
+    res.status(201).json({ success: true, url: session.url });
+  } catch (error: any) {
+    console.error("Registration/Stripe Error:", error);
+    res.status(500).json({ success: false, error: error.message || "Internal server error" });
+  }
+});
+
 // Mock simulation success fallback
 app.get("/api/stripe/mock-success", async (req, res) => {
   const { userId, tier } = req.query;

@@ -32,6 +32,7 @@ import {
 import { doc, getDoc, setDoc, updateDoc } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
 import BillingPlans from "./BillingPlans";
+import TrialSignUpModal from "./TrialSignUpModal";
 
 export default function SubscriptionView() {
   // Current user state (Firebase or local fallback)
@@ -1029,7 +1030,18 @@ export default function SubscriptionView() {
       {/* --- AUTHENTICATION MODALS --- */}
       
       {/* 1. SIGN UP MODAL */}
-      {activeModal === "signup" && (
+      {activeModal === "signup" && (pendingPlan === "monthly" || pendingPlan === "yearly") && (
+        <TrialSignUpModal 
+          planType={pendingPlan} 
+          onClose={() => {
+            setActiveModal("none");
+            setAuthError(null);
+            setPendingPlan(null);
+          }} 
+        />
+      )}
+
+      {activeModal === "signup" && pendingPlan !== "monthly" && pendingPlan !== "yearly" && (
         <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center z-50 p-4" id="modal-signup-container">
           <div className="bg-white border border-slate-200 rounded-2xl max-w-sm w-full p-6 shadow-xl relative animate-scaleUp">
             
