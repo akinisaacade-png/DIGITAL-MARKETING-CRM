@@ -31,6 +31,7 @@ import {
 } from "firebase/auth";
 import { doc, getDoc, setDoc, updateDoc } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
+import BillingPlans from "./BillingPlans";
 
 export default function SubscriptionView() {
   // Current user state (Firebase or local fallback)
@@ -117,6 +118,49 @@ export default function SubscriptionView() {
     });
 
     return () => unsubscribe();
+  }, []);
+
+  // Process URL queries for Stripe payments redirect outcomes
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const paymentSuccess = urlParams.get("payment_success") === "true" || urlParams.get("status") === "success";
+    const paymentCanceled = urlParams.get("payment_canceled") === "true" || urlParams.get("status") === "cancelled";
+    const rawTier = urlParams.get("tier") || urlParams.get("planType");
+    const tier = rawTier ? rawTier.toLowerCase() : null;
+
+    if (paymentSuccess && tier) {
+      triggerSuccessNotification(`Payment confirmed! Successfully upgraded to ${tier === "yearly" ? "Yearly Enterprise" : "Monthly Pro"} plan.`);
+      
+      // Update local storage too if it's a fallback local user
+      const savedLocalUser = localStorage.getItem("crm_local_user");
+      if (savedLocalUser) {
+        try {
+          const parsed = JSON.parse(savedLocalUser);
+          const expires = new Date();
+          if (tier === "yearly") expires.setFullYear(expires.getFullYear() + 1);
+          else expires.setMonth(expires.getMonth() + 1);
+
+          parsed.subscriptionTier = tier;
+          parsed.subscriptionExpires = expires.toISOString();
+          parsed.subscriptionAt = new Date().toISOString();
+          localStorage.setItem("crm_local_user", JSON.stringify(parsed));
+          
+          setSubscription({
+            tier: tier as any,
+            expiresAt: parsed.subscriptionExpires,
+            subscribedAt: parsed.subscriptionAt
+          });
+        } catch (e) {
+          console.error("Failed to parse local storage user for tier update", e);
+        }
+      }
+
+      // Clear the query parameters cleanly so they don't trigger again on refresh
+      window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (paymentCanceled) {
+      setAuthError("Stripe Checkout was canceled. You can try upgrading again whenever you are ready.");
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
   }, []);
 
   // Fetch subscription tier details from cloud DB
@@ -478,14 +522,53 @@ export default function SubscriptionView() {
   };
 
   // Triggers subscription activation / upgrade
-  const handlePurchasePlan = (plan: "free_trial" | "monthly" | "yearly") => {
+  const handlePurchasePlan = async (plan: "free_trial" | "monthly" | "yearly") => {
     if (!user) {
       // Prompt sign up modal, save plan as pending
       setPendingPlan(plan);
       setActiveModal("signup");
       setAuthError(`Please register or Sign In below to activate your ${plan === "free_trial" ? "Free Trial" : plan === "monthly" ? "Monthly Pro" : "Yearly Premium"} subscription.`);
-    } else {
+      return;
+    }
+
+    if (plan === "free_trial") {
       saveSubscription(user.uid, plan, user.isLocalFallback);
+      return;
+    }
+
+    // Monthly & Yearly Stripe Checkout session trigger
+    setIsLoading(true);
+    setAuthError(null);
+    try {
+      const response = await fetch("/api/stripe/create-checkout-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: user.uid,
+          email: user.email,
+          tier: plan
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Could not generate Checkout session.");
+      }
+
+      if (data.url) {
+        if (data.isSimulated) {
+          console.log("[Stripe Simulation] Redirecting to simulated checkout success pipeline.");
+        }
+        // Redirect to Stripe checkout page (or mock success URL)
+        window.location.href = data.url;
+      } else {
+        throw new Error("No redirect session URL returned.");
+      }
+    } catch (err: any) {
+      console.error("[Stripe Redirect error]:", err);
+      setAuthError(`Checkout Failed: ${err.message || "An unexpected error occurred."}`);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -749,6 +832,9 @@ export default function SubscriptionView() {
               </div>
             </div>
           </div>
+
+          {/* Direct Stripe Billing Component */}
+          <BillingPlans userEmail={user?.email} />
         </div>
 
         {/* RIGHT COLUMN: User Session & Auth Portal */}

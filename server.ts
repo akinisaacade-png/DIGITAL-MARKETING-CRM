@@ -3,6 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import Stripe from "stripe";
 import { initializeApp } from "firebase/app";
 import { 
   getFirestore, 
@@ -158,7 +159,28 @@ async function callWithRetry<T>(
 }
 
 const app = express();
-app.use(express.json());
+app.use(express.json({
+  verify: (req: any, res, buf) => {
+    if (req.originalUrl && req.originalUrl.startsWith("/api/stripe/webhook")) {
+      req.rawBody = buf;
+    }
+  }
+}));
+
+// Lazy initialization of Stripe client
+let stripeClient: Stripe | null = null;
+function getStripe(): Stripe {
+  if (!stripeClient) {
+    const key = process.env.STRIPE_SECRET_KEY;
+    if (!key) {
+      throw new Error("STRIPE_SECRET_KEY environment variable is required");
+    }
+    stripeClient = new Stripe(key, {
+      apiVersion: "2025-02-11-preview" as any,
+    });
+  }
+  return stripeClient;
+}
 
 const PORT = 3000;
 
@@ -717,6 +739,144 @@ async function seedDatabaseIfEmpty() {
     console.error("[Firebase] Error checking or seeding Firestore:", err);
   }
 }
+
+// --- STRIPE SUBSCRIPTION PIPELINES ---
+
+app.post(["/api/stripe/create-checkout-session", "/api/checkout"], async (req, res) => {
+  const { userId, email, tier, customerEmail, planType } = req.body;
+  
+  // Support both custom user params and fallback params
+  const activeEmail = customerEmail || email;
+  const activeTier = planType || tier;
+  const activeUserId = userId || activeEmail || "guest";
+
+  if (!activeTier) {
+    return res.status(400).json({ error: "Missing required fields: planType or tier" });
+  }
+
+  const appUrl = process.env.APP_URL || "http://localhost:3000";
+
+  // If Stripe client keys are missing, gracefully run simulation mode
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey || stripeKey.includes("...") || stripeKey === "sk_live_") {
+    console.warn("[Stripe] Stripe secret key not found or placeholder. Entering subscription simulation mode.");
+    return res.json({
+      id: "mock_session_123",
+      url: `/api/stripe/mock-success?userId=${activeUserId}&tier=${activeTier}`,
+      isSimulated: true
+    });
+  }
+
+  try {
+    const stripe = getStripe();
+    // Match Price ID
+    const priceId = activeTier === "yearly"
+      ? process.env.STRIPE_PRICE_ID_YEARLY || "price_1TnBfQBMbxh6jv0CFkCGyPdA"
+      : process.env.STRIPE_PRICE_ID_MONTHLY || "price_1TnBfPBMbxh6jv0C1UWWj9H7";
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      mode: "subscription",
+      success_url: `${appUrl}/dashboard?session_id={CHECKOUT_SESSION_ID}&status=success&tier=${activeTier}&planType=${activeTier}`,
+      cancel_url: `${appUrl}/billing?status=cancelled`,
+      client_reference_id: activeUserId,
+      customer_email: activeEmail || undefined,
+      metadata: {
+        userId: activeUserId,
+        tier: activeTier
+      }
+    });
+
+    res.status(200).json({ id: session.id, url: session.url, isSimulated: false });
+  } catch (error: any) {
+    console.error("[Stripe Checkout Error]:", error);
+    res.status(500).json({ error: error.message || "Failed to create Stripe Checkout session" });
+  }
+});
+
+// Mock simulation success fallback
+app.get("/api/stripe/mock-success", async (req, res) => {
+  const { userId, tier } = req.query;
+  const targetTier = tier === "yearly" ? "yearly" : "monthly";
+
+  if (userId) {
+    const expires = new Date();
+    if (targetTier === "yearly") expires.setFullYear(expires.getFullYear() + 1);
+    else expires.setMonth(expires.getMonth() + 1);
+
+    const isLocal = String(userId).startsWith("local_");
+    if (!isLocal && db) {
+      try {
+        await updateDoc(doc(db, "users", String(userId)), {
+          subscriptionTier: targetTier,
+          subscriptionExpires: expires.toISOString(),
+          subscriptionAt: new Date().toISOString()
+        });
+        console.log(`[Stripe Mock] Updated subscription for user ${userId} to ${targetTier}`);
+      } catch (err) {
+        console.warn(`[Stripe Mock] Firestore save failed for user ${userId}:`, err);
+      }
+    }
+  }
+
+  const appUrl = process.env.APP_URL || "http://localhost:3000";
+  res.redirect(`${appUrl}/dashboard?session_id=mock_session_123&status=success&tier=${targetTier}&planType=${targetTier}`);
+});
+
+// Official Stripe webhook event processor
+app.post("/api/stripe/webhook", async (req: any, res) => {
+  const sig = req.headers["stripe-signature"];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!sig || !webhookSecret || webhookSecret.includes("...")) {
+    console.warn("[Stripe Webhook] Missing or placeholder webhook secret. Skipping signature check.");
+    // Under testing / simulation, bypass signature verification or return status
+    return res.status(400).json({ error: "Missing stripe-signature or webhook secret" });
+  }
+
+  let event;
+  try {
+    const stripe = getStripe();
+    event = stripe.webhooks.constructEvent(req.rawBody || JSON.stringify(req.body), sig, webhookSecret);
+  } catch (err: any) {
+    console.error(`[Stripe Webhook Verification Failed]: ${err.message}`);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Act on event payload details
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object as any;
+    const userId = session.client_reference_id || session.metadata?.userId;
+    const tier = session.metadata?.tier || "monthly";
+
+    if (userId) {
+      const expires = new Date();
+      if (tier === "yearly") expires.setFullYear(expires.getFullYear() + 1);
+      else expires.setMonth(expires.getMonth() + 1);
+
+      if (db) {
+        try {
+          await updateDoc(doc(db, "users", userId), {
+            subscriptionTier: tier,
+            subscriptionExpires: expires.toISOString(),
+            subscriptionAt: new Date().toISOString()
+          });
+          console.log(`[Stripe Webhook] Successfully upgraded subscription to ${tier} for user ${userId}`);
+        } catch (dbErr) {
+          console.error(`[Stripe Webhook] Firestore upgrade update failed for user ${userId}:`, dbErr);
+        }
+      }
+    }
+  }
+
+  res.json({ received: true });
+});
 
 // --- ENDPOINTS FOR LEADS ---
 

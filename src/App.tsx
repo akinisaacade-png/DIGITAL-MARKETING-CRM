@@ -91,6 +91,17 @@ export default function App() {
     fetchAllData();
   }, []);
 
+  // Process custom redirect paths (/billing and /dashboard) and status parameters
+  useEffect(() => {
+    const path = window.location.pathname;
+    const search = window.location.search;
+    if (path.includes("/billing") || search.includes("status=cancelled") || search.includes("payment_canceled=true")) {
+      setActiveTab("subscription");
+    } else if (path.includes("/dashboard") || search.includes("status=success") || search.includes("payment_success=true")) {
+      setActiveTab("subscription"); // Show the subscription view so they see the success message
+    }
+  }, []);
+
   // Periodic background polling for live heat-score changes & campaign updates
   useEffect(() => {
     const pollUpdates = async () => {
