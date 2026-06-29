@@ -114,7 +114,12 @@ async function callWithRetry<T>(
     try {
       return await fn();
     } catch (error: any) {
-      const errorStringified = JSON.stringify(error?.error || error || "");
+      let errorStringified = "";
+      try {
+        errorStringified = JSON.stringify(error?.error || { message: error?.message || String(error) });
+      } catch (stringifyError) {
+        errorStringified = String(error?.error || error || "");
+      }
       const errorMsg = error?.message || "";
       const errorStatus = error?.status || error?.error?.status || "";
       const errorCode = error?.status || error?.error?.code || error?.statusCode || "";
@@ -140,12 +145,25 @@ async function callWithRetry<T>(
           }
         }
 
+        // Extract recommended retry seconds from the error string via regex if not found in details
+        if (calculatedDelay <= 0) {
+          const regexMatch = errCombinedString.match(/(?:please retry in|retry in|retry after)\s*([\d\.]+)\s*s/);
+          if (regexMatch && regexMatch[1]) {
+            const seconds = parseFloat(regexMatch[1]);
+            if (!isNaN(seconds)) {
+              calculatedDelay = (seconds + 1.5) * 1000; // Add 1.5s extra safety buffer
+            }
+          }
+        }
+
         // Fallback to standard exponential backoff if no specific retry delay is requested by the API
         if (calculatedDelay <= 0) {
           const exponentialDelay = minDelayMs * Math.pow(2, attempt - 1);
           const maxJitter = minDelayMs * Math.pow(2, attempt);
           const jitter = Math.random() * (maxJitter - exponentialDelay);
-          calculatedDelay = Math.min(exponentialDelay + jitter, maxDelayMs);
+          const standardDelay = Math.min(exponentialDelay + jitter, maxDelayMs);
+          // If we hit a quota error, sleeping for at least 46 seconds helps clear rolling windows and matches user request!
+          calculatedDelay = Math.max(46000, standardDelay);
         }
 
         console.warn(`[Gemini Retry]: Quota exceeded (RESOURCE_EXHAUSTED / 429). Attempt ${attempt}/${maxAttempts}. Sleeping for ${Math.round(calculatedDelay)}ms before retrying...`);
@@ -176,7 +194,7 @@ function getStripe(): Stripe {
       throw new Error("STRIPE_SECRET_KEY environment variable is required");
     }
     stripeClient = new Stripe(key, {
-      apiVersion: "2025-02-11-preview" as any,
+      apiVersion: "2023-10-16" as any,
     });
   }
   return stripeClient;
@@ -823,7 +841,13 @@ app.post("/api/auth/register-and-subscribe", async (req, res) => {
     subscriptionTier: activeTier,
     subscriptionExpires: expires.toISOString(),
     subscriptionAt: new Date().toISOString(),
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    subscriptionStatus: "active",
+    "subscription status": "active",
+    planType: activeTier,
+    "plan type": activeTier,
+    plan: activeTier,
+    subscription_id: "simulated_sub_reg_" + Date.now()
   };
 
   try {
@@ -897,11 +921,17 @@ app.get("/api/stripe/mock-success", async (req, res) => {
     const isLocal = String(userId).startsWith("local_");
     if (!isLocal && db) {
       try {
-        await updateDoc(doc(db, "users", String(userId)), {
+        await setDoc(doc(db, "users", String(userId)), {
           subscriptionTier: targetTier,
           subscriptionExpires: expires.toISOString(),
-          subscriptionAt: new Date().toISOString()
-        });
+          subscriptionAt: new Date().toISOString(),
+          subscriptionStatus: "active",
+          "subscription status": "active",
+          planType: targetTier,
+          "plan type": targetTier,
+          plan: targetTier,
+          subscription_id: "simulated_sub_mock_" + Date.now()
+        }, { merge: true });
         console.log(`[Stripe Mock] Updated subscription for user ${userId} to ${targetTier}`);
       } catch (err) {
         console.warn(`[Stripe Mock] Firestore save failed for user ${userId}:`, err);
@@ -911,6 +941,65 @@ app.get("/api/stripe/mock-success", async (req, res) => {
 
   const appUrl = process.env.APP_URL || "http://localhost:3000";
   res.redirect(`${appUrl}/dashboard?session_id=mock_session_123&status=success&tier=${targetTier}&planType=${targetTier}`);
+});
+
+// Create Customer Portal session endpoint
+app.post("/api/stripe/create-portal-session", async (req, res) => {
+  const { email, userId } = req.body;
+  const activeEmail = email || "guest@example.com";
+  
+  const appUrl = process.env.APP_URL || "http://localhost:3000";
+
+  // If Stripe client keys are missing, gracefully run simulation mode
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey || stripeKey.includes("...") || stripeKey === "sk_live_") {
+    console.warn("[Stripe] Stripe secret key not found or placeholder. Entering portal simulation mode.");
+    return res.json({
+      url: `${appUrl}/dashboard?status=portal_simulated`,
+      isSimulated: true
+    });
+  }
+
+  try {
+    const stripe = getStripe();
+    
+    // Look up customer by email
+    let customerId: string | null = null;
+    if (activeEmail) {
+      const customers = await stripe.customers.list({
+        email: String(activeEmail).trim().toLowerCase(),
+        limit: 1
+      });
+      if (customers.data.length > 0) {
+        customerId = customers.data[0].id;
+      }
+    }
+
+    // If no customer is found, we can try searching by metadata or create one
+    if (!customerId && userId) {
+      const customers = await stripe.customers.search({
+        query: `metadata['userId']:'${userId}'`,
+        limit: 1
+      });
+      if (customers.data.length > 0) {
+        customerId = customers.data[0].id;
+      }
+    }
+
+    if (!customerId) {
+      return res.status(404).json({ error: "No active Stripe customer found for this account. Please subscribe first." });
+    }
+
+    const session = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: `${appUrl}/dashboard`
+    });
+
+    res.status(200).json({ url: session.url, isSimulated: false });
+  } catch (error: any) {
+    console.error("Portal Session Error:", error);
+    res.status(500).json({ error: error.message || "Failed to create portal session" });
+  }
 });
 
 // Official Stripe webhook event processor
@@ -946,11 +1035,17 @@ app.post("/api/stripe/webhook", async (req: any, res) => {
 
       if (db) {
         try {
-          await updateDoc(doc(db, "users", userId), {
+          await setDoc(doc(db, "users", userId), {
             subscriptionTier: tier,
             subscriptionExpires: expires.toISOString(),
-            subscriptionAt: new Date().toISOString()
-          });
+            subscriptionAt: new Date().toISOString(),
+            subscriptionStatus: "active",
+            "subscription status": "active",
+            planType: tier,
+            "plan type": tier,
+            plan: tier,
+            subscription_id: session.subscription || session.id || "webhook_sub_completed"
+          }, { merge: true });
           console.log(`[Stripe Webhook] Successfully upgraded subscription to ${tier} for user ${userId}`);
         } catch (dbErr) {
           console.error(`[Stripe Webhook] Firestore upgrade update failed for user ${userId}:`, dbErr);
@@ -2221,7 +2316,12 @@ Provide a fully written, polished, ready-to-use marketing asset structured with 
 
     res.json({ success: true, text: response.text });
   } catch (error: any) {
-    const errString = String(error) + " " + JSON.stringify(error) + " " + (error?.message || "");
+    let errString = String(error) + " " + (error?.message || "");
+    try {
+      errString += " " + JSON.stringify(error?.error || { message: error?.message });
+    } catch (e) {
+      // ignore
+    }
     const isQuotaError = errString.includes("429") || 
                          errString.includes("RESOURCE_EXHAUSTED") || 
                          errString.includes("quota") || 
@@ -2412,7 +2512,12 @@ I am currently running in offline preview. Based on your current CRM stats (**${
 
     res.json({ success: true, text: response.text });
   } catch (error: any) {
-    const errString = String(error) + " " + JSON.stringify(error) + " " + (error?.message || "");
+    let errString = String(error) + " " + (error?.message || "");
+    try {
+      errString += " " + JSON.stringify(error?.error || { message: error?.message });
+    } catch (e) {
+      // ignore
+    }
     const isQuotaError = errString.includes("429") || 
                          errString.includes("RESOURCE_EXHAUSTED") || 
                          errString.includes("quota") || 
@@ -2441,92 +2546,137 @@ How else can I help you adjust your funnel metrics today?`;
 });
 
 app.post("/api/gemini/orchestrate", async (req, res) => {
-  const { prompt, mode = "orchestrator", customInputs = {} } = req.body;
+  try {
+    const { prompt, mode = "orchestrator", customInputs = {} } = req.body || {};
 
-  if (!prompt) {
-    return res.status(400).json({ success: false, error: "Prompt is required" });
-  }
-
-  // Gather real CRM data for context
-  const activeLeadsSummary = leads.map(l => ({
-    id: l.id,
-    name: l.name,
-    company: l.company,
-    email: l.email,
-    stage: l.stage,
-    score: l.score,
-    source: l.source,
-    value: l.value,
-    created: l.createdTime
-  }));
-
-  const campaignsSummary = campaigns.map(c => ({
-    platform: c.platform,
-    status: c.status,
-    spent: c.spent,
-    clicks: c.clicks,
-    impressions: c.impressions,
-    conversions: c.conversions,
-    ctr: c.ctr,
-    roi: c.roi
-  }));
-
-  const activitiesSummary = activities.slice(0, 15).map(a => ({
-    type: a.type,
-    message: a.message,
-    time: a.timestamp
-  }));
-
-  // Setup agents
-  const agentConfigs = {
-    campaign_content_agent: {
-      name: "Campaign Content Agent",
-      role: "digital marketing strategist and copywriter",
-      system_instruction: "You are a digital marketing strategist and copywriter. Generate on-brand, channel-specific campaign content. Output detailed, ready-to-use copy across Email, Social Media, Paid Ads, and SEO pillars.",
-      getPrompt: (inputs: any) => {
-        const brand = inputs.brand_profile || "A modern marketing automation software";
-        const audience = inputs.audience_segments || "Small business owners, digital agencies";
-        const goal = inputs.goal || "Boost trial signups";
-        const channels = inputs.channels || ["Email", "LinkedIn", "Facebook Ads", "SEO"];
-        const constraints = inputs.constraints || "Keep copy professional, action-oriented, and strictly focused on conversions.";
-        return `Brand: ${JSON.stringify(brand)}; Audience: ${JSON.stringify(audience)}; Goal: ${goal}; Channels: ${JSON.stringify(channels)}; Constraints: ${JSON.stringify(constraints)}\n\nUser instructions: ${prompt}`;
-      }
-    },
-    crm_lead_scoring_agent: {
-      name: "CRM Lead Scoring Agent",
-      role: "CRM intelligence agent for digital marketing",
-      system_instruction: "You are a CRM intelligence agent for digital marketing. Score leads, predict conversions, and surface pipeline risks. Output specific actionable suggestions for which high-score leads to prioritize, which are at risk, and recommend sequence interventions.",
-      getPrompt: (inputs: any) => {
-        const lead_data = inputs.lead_data || activeLeadsSummary;
-        const history = inputs.interaction_history || { activities: activitiesSummary };
-        const campaign_data = inputs.campaign_data || { campaigns: campaignsSummary };
-        return `Leads: ${JSON.stringify(lead_data)}; History: ${JSON.stringify(history)}; Campaigns: ${JSON.stringify(campaign_data)}\n\nUser instructions: ${prompt}`;
-      }
-    },
-    marketing_analytics_agent: {
-      name: "Marketing Analytics Agent",
-      role: "marketing analytics expert",
-      system_instruction: "You are a marketing analytics expert. Diagnose performance changes and recommend actions based on CPC, CTR, Spent, and Conversions. Contrast campaigns with industry benchmarks ($1.84 CPC, 2.15% CTR) and offer tactical steps to improve ROI.",
-      getPrompt: (inputs: any) => {
-        const metrics = inputs.metrics_json || {
-          totalSpent: campaigns.reduce((s, c) => s + c.spent, 0),
-          totalConversions: campaigns.reduce((s, c) => s + c.conversions, 0),
-          averageCtr: campaigns.reduce((s, c) => s + c.ctr, 0) / (campaigns.length || 1),
-          leadsCount: leads.length,
-          wonRevenue: leads.filter(l => l.stage === "Won").reduce((s, l) => s + l.value, 0)
-        };
-        const timeframe = inputs.timeframe || "Last 30 Days";
-        const campaignsData = inputs.campaigns || campaignsSummary;
-        return `Metrics: ${JSON.stringify(metrics)}; Timeframe: ${timeframe}; Campaigns: ${JSON.stringify(campaignsData)}\n\nUser instructions: ${prompt}`;
-      }
+    if (!prompt) {
+      return res.status(400).json({ success: false, error: "Prompt is required" });
     }
-  };
 
-  // Traces/Logs of routing
-  const logs: string[] = [
-    `[ADK-INIT] Initializing Digital Marketing CRM Multi-Agent Orchestrator...`,
-    `[USER-INPUT] Analyzing prompt length: ${prompt.length} chars. Mode parameter: "${mode}"`,
-  ];
+    // Safely gather real CRM data for context from firestore or fallbacks
+    let activeLeadsSummary: any[] = [];
+    try {
+      const dbLeads = await getFbLeads();
+      activeLeadsSummary = (dbLeads || []).map(l => ({
+        id: l.id,
+        name: l.name,
+        company: l.company,
+        email: l.email,
+        stage: l.stage,
+        score: l.score,
+        source: l.source,
+        value: l.value,
+        created: l.createdTime || ""
+      }));
+    } catch (dbErr) {
+      console.warn("[Orchestrator] Firestore leads load failed, using local static state:", dbErr);
+      activeLeadsSummary = (leads || []).map(l => ({
+        id: l.id,
+        name: l.name,
+        company: l.company,
+        email: l.email,
+        stage: l.stage,
+        score: l.score,
+        source: l.source,
+        value: l.value,
+        created: l.createdTime || ""
+      }));
+    }
+
+    let campaignsSummary: any[] = [];
+    try {
+      const dbCamps = await getFbCampaigns();
+      campaignsSummary = (dbCamps || []).map(c => ({
+        platform: c.platform,
+        status: c.status,
+        spent: c.spent,
+        clicks: c.clicks,
+        impressions: c.impressions,
+        conversions: c.conversions,
+        ctr: c.ctr,
+        roi: c.roi
+      }));
+    } catch (dbErr) {
+      console.warn("[Orchestrator] Firestore campaigns load failed, using local static state:", dbErr);
+      campaignsSummary = (campaigns || []).map(c => ({
+        platform: c.platform,
+        status: c.status,
+        spent: c.spent,
+        clicks: c.clicks,
+        impressions: c.impressions,
+        conversions: c.conversions,
+        ctr: c.ctr,
+        roi: c.roi
+      }));
+    }
+
+    let activitiesSummary: any[] = [];
+    try {
+      const dbActs = await getFbActivities();
+      activitiesSummary = (dbActs || []).slice(0, 15).map(a => ({
+        type: a.type,
+        message: a.message,
+        time: a.timestamp || ""
+      }));
+    } catch (dbErr) {
+      console.warn("[Orchestrator] Firestore activities load failed, using local static state:", dbErr);
+      activitiesSummary = (activities || []).slice(0, 15).map(a => ({
+        type: a.type,
+        message: a.message,
+        time: a.timestamp || ""
+      }));
+    }
+
+    // Setup agents
+    const agentConfigs = {
+      campaign_content_agent: {
+        name: "Campaign Content Agent",
+        role: "digital marketing strategist and copywriter",
+        system_instruction: "You are a digital marketing strategist and copywriter. Generate on-brand, channel-specific campaign content. Output detailed, ready-to-use copy across Email, Social Media, Paid Ads, and SEO pillars.",
+        getPrompt: (inputs: any) => {
+          const brand = inputs.brand_profile || "A modern marketing automation software";
+          const audience = inputs.audience_segments || "Small business owners, digital agencies";
+          const goal = inputs.goal || "Boost trial signups";
+          const channels = inputs.channels || ["Email", "LinkedIn", "Facebook Ads", "SEO"];
+          const constraints = inputs.constraints || "Keep copy professional, action-oriented, and strictly focused on conversions.";
+          return `Brand: ${JSON.stringify(brand)}; Audience: ${JSON.stringify(audience)}; Goal: ${goal}; Channels: ${JSON.stringify(channels)}; Constraints: ${JSON.stringify(constraints)}\n\nUser instructions: ${prompt}`;
+        }
+      },
+      crm_lead_scoring_agent: {
+        name: "CRM Lead Scoring Agent",
+        role: "CRM intelligence agent for digital marketing",
+        system_instruction: "You are a CRM intelligence agent for digital marketing. Score leads, predict conversions, and surface pipeline risks. Output specific actionable suggestions for which high-score leads to prioritize, which are at risk, and recommend sequence interventions.",
+        getPrompt: (inputs: any) => {
+          const lead_data = inputs.lead_data || activeLeadsSummary;
+          const history = inputs.interaction_history || { activities: activitiesSummary };
+          const campaign_data = inputs.campaign_data || { campaigns: campaignsSummary };
+          return `Leads: ${JSON.stringify(lead_data)}; History: ${JSON.stringify(history)}; Campaigns: ${JSON.stringify(campaign_data)}\n\nUser instructions: ${prompt}`;
+        }
+      },
+      marketing_analytics_agent: {
+        name: "Marketing Analytics Agent",
+        role: "marketing analytics expert",
+        system_instruction: "You are a marketing analytics expert. Diagnose performance changes and recommend actions based on CPC, CTR, Spent, and Conversions. Contrast campaigns with industry benchmarks ($1.84 CPC, 2.15% CTR) and offer tactical steps to improve ROI.",
+        getPrompt: (inputs: any) => {
+          const metrics = inputs.metrics_json || {
+            totalSpent: campaignsSummary.reduce((s, c) => s + (c.spent || 0), 0),
+            totalConversions: campaignsSummary.reduce((s, c) => s + (c.conversions || 0), 0),
+            averageCtr: campaignsSummary.reduce((s, c) => s + (c.ctr || 0), 0) / (campaignsSummary.length || 1),
+            leadsCount: activeLeadsSummary.length,
+            wonRevenue: activeLeadsSummary.filter(l => l.stage === "Won").reduce((s, l) => s + (l.value || 0), 0)
+          };
+          const timeframe = inputs.timeframe || "Last 30 Days";
+          const campaignsData = inputs.campaigns || campaignsSummary;
+          return `Metrics: ${JSON.stringify(metrics)}; Timeframe: ${timeframe}; Campaigns: ${JSON.stringify(campaignsData)}\n\nUser instructions: ${prompt}`;
+        }
+      }
+    };
+
+    // Traces/Logs of routing
+    const logs: string[] = [
+      `[ADK-INIT] Initializing Digital Marketing CRM Multi-Agent Orchestrator...`,
+      `[USER-INPUT] Analyzing prompt length: ${prompt.length} chars. Mode parameter: "${mode}"`,
+    ];
 
   try {
     if (!ai) {
@@ -2765,7 +2915,17 @@ You MUST respond strictly in a valid JSON object structure with exactly these ke
     });
 
   } catch (error: any) {
-    console.warn("Multi-Agent Orchestration rate limits or connection warning:", error?.message || error);
+    const isQuotaError = error && (
+                         error.status === 'RESOURCE_EXHAUSTED' || 
+                         error.message?.includes('429') || 
+                         error.message?.includes('quota') || 
+                         error.status === 429);
+
+    if (isQuotaError) {
+      console.log("[Orchestrator]: Note: Gemini API quota limit reached. Gracefully failing over to local CRM intelligence engine.");
+    } else {
+      console.log(`[Orchestrator Info]: Handled fallback operation: ${error?.message || error}`);
+    }
     
     // Determine which agent we were trying to run to route local fallback properly
     let resolvedKey = mode;
@@ -2877,11 +3037,6 @@ I noticed that our connection to the main Gemini brain is currently experiencing
 - **Order Confirmation Snippet**: Thank you for upgrading! Your workspace is ready. Tap 'Launch Dashboard' to configure your active agents.`;
     }
 
-    const isQuotaError = error.status === 'RESOURCE_EXHAUSTED' || 
-                         error.message?.includes('429') || 
-                         error.message?.includes('quota') || 
-                         error.status === 429;
-
     return res.json({
       success: true,
       isFallback: true,
@@ -2903,6 +3058,19 @@ I noticed that our connection to the main Gemini brain is currently experiencing
       text: fallbackText
     });
   }
+} catch (masterError: any) {
+  console.error("[Orchestrate Master Error]:", masterError);
+  return res.status(500).json({
+    success: false,
+    error: masterError.message || String(masterError),
+    isFallback: true,
+    text: `### ⚠️ [AI Master Fallback Active]
+An unexpected internal server error occurred while orchestrating this request. Local fallback engine activated.`,
+    logs: [
+      `[CRITICAL-ERROR] Internal master orchestrator exception: ${masterError.message || ""}`
+    ]
+  });
+}
 });
 
 // --- AUTOMATED MAINTENANCE AGENT ACTIONS ---

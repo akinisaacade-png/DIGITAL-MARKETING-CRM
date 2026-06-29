@@ -158,6 +158,9 @@ export default function SubscriptionView() {
 
       // Clear the query parameters cleanly so they don't trigger again on refresh
       window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (urlParams.get("status") === "portal_simulated") {
+      triggerSuccessNotification("Simulated Stripe Customer Portal: Successfully updated payment methods or subscription details.");
+      window.history.replaceState({}, document.title, window.location.pathname);
     } else if (paymentCanceled) {
       setAuthError("Stripe Checkout was canceled. You can try upgrading again whenever you are ready.");
       window.history.replaceState({}, document.title, window.location.pathname);
@@ -573,9 +576,66 @@ export default function SubscriptionView() {
     }
   };
 
+  // Triggers Stripe Billing Portal redirection
+  const handleManageSubscription = async () => {
+    if (!user) return;
+    setIsLoading(true);
+    setAuthError(null);
+    try {
+      const response = await fetch("/api/stripe/create-portal-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: user.uid,
+          email: user.email,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Could not generate Billing Portal session.");
+      }
+
+      if (data.url) {
+        if (data.isSimulated) {
+          console.log("[Stripe Portal Simulation] Redirecting to simulated billing portal.");
+        }
+        window.location.href = data.url;
+      } else {
+        throw new Error("No billing portal URL returned.");
+      }
+    } catch (err: any) {
+      console.error("[Portal Redirect error]:", err);
+      setAuthError(`Portal Redirect Failed: ${err.message || "An unexpected error occurred."}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const triggerSuccessNotification = (msg: string) => {
     setSuccessMsg(msg);
     setTimeout(() => setSuccessMsg(null), 5000);
+  };
+
+  // Warning check helper to display warning 3 days before auto-renew for monthly or yearly subscribers
+  const getRenewalWarningDetails = () => {
+    if (!subscription.expiresAt || (subscription.tier !== "monthly" && subscription.tier !== "yearly")) {
+      return null;
+    }
+    const expiryDate = new Date(subscription.expiresAt);
+    const now = new Date();
+    const diffTime = expiryDate.getTime() - now.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    
+    // If the difference is between 0 and 3 days, show the warning
+    if (diffDays >= 0 && diffDays <= 3) {
+      return {
+        daysLeft: diffDays,
+        expiryDate: expiryDate,
+        isCritical: diffDays <= 1
+      };
+    }
+    return null;
   };
 
   return (
@@ -601,6 +661,59 @@ export default function SubscriptionView() {
         )}
       </div>
 
+      {/* Auto-Renewal Warning Notification Banner */}
+      {(() => {
+        const warning = getRenewalWarningDetails();
+        if (!warning) return null;
+        return (
+          <div 
+            id="renewal-warning-banner"
+            className={`p-4 rounded-2xl border flex flex-col md:flex-row md:items-center justify-between gap-4 animate-slideDown shadow-3xs transition-all ${
+              warning.isCritical 
+                ? "bg-red-50 border-red-200 text-red-800" 
+                : "bg-amber-50 border-amber-200 text-amber-800"
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              <div className={`p-2 rounded-xl shrink-0 ${
+                warning.isCritical ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-600"
+              }`}>
+                <Clock size={18} className="animate-pulse" />
+              </div>
+              <div className="space-y-1">
+                <h4 className={`text-xs font-extrabold uppercase tracking-wider ${
+                  warning.isCritical ? "text-red-900" : "text-amber-950"
+                }`}>
+                  Upcoming Auto-Renewal Warning ({warning.daysLeft} {warning.daysLeft === 1 ? 'day' : 'days'} left)
+                </h4>
+                <p className="text-xs leading-relaxed text-slate-700">
+                  Your <strong className="font-extrabold uppercase text-indigo-700">{subscription.tier}</strong> subscription will automatically renew and charge your payment method on <strong className="font-semibold">{warning.expiryDate.toLocaleDateString()}</strong> at <strong className="font-semibold">{warning.expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</strong>.
+                </p>
+                <p className="text-[10px] text-slate-500">
+                  You can update your payment method or cancel your plan through the customer portal to avoid unwanted charges.
+                </p>
+              </div>
+            </div>
+            
+            <div className="flex items-center gap-2 self-end md:self-center shrink-0">
+              <button
+                id="btn-warning-manage"
+                onClick={handleManageSubscription}
+                disabled={isLoading}
+                className={`px-3.5 py-2 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 shadow-xs cursor-pointer ${
+                  warning.isCritical
+                    ? "bg-red-600 hover:bg-red-700 text-white"
+                    : "bg-amber-600 hover:bg-amber-700 text-white"
+                }`}
+              >
+                <CreditCard size={13} />
+                Manage Renewal Settings
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Firebase Developer Configuration Assistance Notice */}
       {firebaseWarning && (
         <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl flex items-start gap-3 text-xs text-amber-800 animate-slideDown" id="firebase-auth-assistant-banner">
@@ -615,6 +728,63 @@ export default function SubscriptionView() {
           </div>
         </div>
       )}
+
+      {/* Current Subscription Tier Visual Banner Indicator */}
+      <div 
+        id="current-tier-banner-indicator"
+        className={`p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 transition-all ${
+          subscription.tier === "yearly" 
+            ? "bg-gradient-to-r from-indigo-50 to-amber-50/50 border-amber-200 shadow-3xs" 
+            : subscription.tier === "monthly"
+            ? "bg-indigo-50/50 border-indigo-100 shadow-3xs"
+            : subscription.tier === "free_trial"
+            ? "bg-slate-50 border-slate-200/80 shadow-3xs"
+            : "bg-slate-50 border-slate-200/80 shadow-3xs"
+        }`}
+      >
+        <div className="flex items-center gap-3.5">
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold shadow-xs ${
+            subscription.tier === "yearly"
+              ? "bg-amber-400 text-indigo-950"
+              : subscription.tier === "monthly"
+              ? "bg-indigo-600 text-white"
+              : "bg-slate-200 text-slate-700"
+          }`}>
+            <Sparkles size={18} className={subscription.tier === "yearly" ? "animate-pulse" : ""} />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Your CRM Subscription Status</span>
+              {subscription.tier !== "none" && (
+                <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 text-[8px] font-extrabold rounded-md uppercase tracking-wide flex items-center gap-0.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Synced with Cloud
+                </span>
+              )}
+            </div>
+            <h4 className="text-sm font-bold text-slate-900 mt-0.5">
+              Current Plan: <span className="text-indigo-600 font-extrabold uppercase">{subscription.tier === "none" ? "Guest Trial" : subscription.tier.replace("_", " ")}</span>
+            </h4>
+          </div>
+        </div>
+        {user ? (
+          <div className="flex items-center gap-2">
+            <button
+              id="btn-banner-manage-portal"
+              onClick={handleManageSubscription}
+              disabled={isLoading}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 shadow-sm hover:shadow-md cursor-pointer disabled:opacity-50"
+            >
+              <CreditCard size={13} />
+              Manage Subscription Settings
+            </button>
+          </div>
+        ) : (
+          <div className="text-xs text-slate-500">
+            Sign up or sign in to persist your plan details in the cloud database.
+          </div>
+        )}
+      </div>
 
       {/* Main Grid View */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -889,7 +1059,41 @@ export default function SubscriptionView() {
                       <span className="text-slate-300">{new Date(subscription.expiresAt).toLocaleDateString()}</span>
                     </div>
                   )}
+                  
+                  {/* Simulation Helper Trigger for Renewal Warning Testing */}
+                  <div className="pt-2 border-t border-slate-800/40 flex flex-col gap-1.5">
+                    <button
+                      id="btn-simulate-renewal-warning"
+                      onClick={() => {
+                        const testDate = new Date();
+                        testDate.setDate(testDate.getDate() + 2); // exactly 2 days from now, triggers warning
+                        setSubscription(prev => ({
+                          ...prev,
+                          expiresAt: testDate.toISOString()
+                        }));
+                        triggerSuccessNotification("Simulated renewal warning: expiry set to 2 days from now!");
+                      }}
+                      className="w-full py-1.5 px-2 bg-slate-900 hover:bg-slate-800 hover:text-indigo-400 text-[10px] text-slate-400 border border-slate-800 rounded-lg transition-all text-center cursor-pointer font-mono"
+                    >
+                      🧪 Simulate Expiry in 2 Days
+                    </button>
+                    {(subscription.tier !== "monthly" && subscription.tier !== "yearly") && (
+                      <p className="text-[9px] text-slate-500 text-center font-mono">
+                        (Select/upgrade to Monthly or Yearly first to test the auto-renew banner)
+                      </p>
+                    )}
+                  </div>
                 </div>
+
+                <button
+                  id="btn-manage-subscription"
+                  onClick={handleManageSubscription}
+                  disabled={isLoading}
+                  className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-all rounded-xl flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <CreditCard size={13} />
+                  Manage Subscription
+                </button>
 
                 <button
                   id="btn-auth-logout"

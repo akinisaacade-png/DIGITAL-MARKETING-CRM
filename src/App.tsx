@@ -29,6 +29,10 @@ import SettingsView from "./components/SettingsView";
 import OrchestratorView from "./components/OrchestratorView";
 import SubscriptionView from "./components/SubscriptionView";
 
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, onSnapshot } from "firebase/firestore";
+import { auth, db } from "./lib/firebase";
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>("dashboard");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -54,6 +58,70 @@ export default function App() {
   });
 
   const [isLoading, setIsLoading] = useState(true);
+  const [currentTier, setCurrentTier] = useState<string>("Guest Trial");
+
+  // Real-time subscription tier listener
+  useEffect(() => {
+    let unsubscribeDoc: (() => void) | null = null;
+
+    const unsubscribeAuth = onAuthStateChanged(auth, (fbUser) => {
+      if (unsubscribeDoc) {
+        unsubscribeDoc();
+        unsubscribeDoc = null;
+      }
+
+      if (fbUser) {
+        unsubscribeDoc = onSnapshot(doc(db, "users", fbUser.uid), (snapshot) => {
+          if (snapshot.exists()) {
+            const data = snapshot.data();
+            const tier = data.subscriptionTier || "free_trial";
+            if (tier === "free_trial") {
+              setCurrentTier("Free Trial");
+            } else if (tier === "monthly") {
+              setCurrentTier("Monthly Pro");
+            } else if (tier === "yearly") {
+              setCurrentTier("Yearly Premium");
+            } else {
+              setCurrentTier(tier.replace("_", " "));
+            }
+          } else {
+            setCurrentTier("Free Trial");
+          }
+        }, (err) => {
+          console.error("Error listening to user doc in sidebar:", err);
+          setCurrentTier("Free Trial");
+        });
+      } else {
+        const savedLocalUser = localStorage.getItem("crm_local_user");
+        if (savedLocalUser) {
+          try {
+            const parsed = JSON.parse(savedLocalUser);
+            const tier = parsed.subscriptionTier || "free_trial";
+            if (tier === "free_trial") {
+              setCurrentTier("Free Trial");
+            } else if (tier === "monthly") {
+              setCurrentTier("Monthly Pro");
+            } else if (tier === "yearly") {
+              setCurrentTier("Yearly Premium");
+            } else {
+              setCurrentTier(tier.replace("_", " "));
+            }
+          } catch (e) {
+            setCurrentTier("Guest Trial");
+          }
+        } else {
+          setCurrentTier("Guest Trial");
+        }
+      }
+    });
+
+    return () => {
+      unsubscribeAuth();
+      if (unsubscribeDoc) {
+        unsubscribeDoc();
+      }
+    };
+  }, []);
 
   // Fetch initial data on mount
   useEffect(() => {
@@ -485,12 +553,32 @@ export default function App() {
         {/* Sidebar Footer info block */}
         <div className="p-6 border-t border-slate-900 space-y-4" id="sidebar-footer-info">
           <div className="bg-slate-900/40 p-3 rounded-xl border border-slate-900 flex items-center gap-2.5">
-            <div className="w-2.5 h-2.5 rounded-full bg-gold-500 animate-pulse" />
+            <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
             <div className="text-[10px]">
               <span className="font-bold text-white block">Connected API Agent</span>
               <span className="text-slate-400 block font-mono">Status: Vigilant</span>
             </div>
           </div>
+
+          <div className="bg-indigo-950/40 p-3 rounded-xl border border-indigo-900/40 flex items-center justify-between gap-2" id="sidebar-subscription-badge">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <div className="text-[10px]">
+                <span className="font-bold text-white block">CRM Tier</span>
+                <span className="text-slate-400 block font-mono text-[9px]">{currentTier}</span>
+              </div>
+            </div>
+            <button
+              onClick={() => setActiveTab("subscription")}
+              className="px-2 py-1 bg-gold-500 hover:bg-gold-600 text-indigo-950 rounded-md font-extrabold text-[8px] uppercase tracking-wider transition-all cursor-pointer"
+            >
+              Manage
+            </button>
+          </div>
+
           <div className="text-[9px] text-slate-500 font-mono text-center">
             DIGITAL MARKETING CRM v1.4.2
           </div>

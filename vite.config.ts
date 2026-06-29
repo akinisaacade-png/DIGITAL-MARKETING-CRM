@@ -14,10 +14,10 @@ export default defineConfig(() => {
     server: {
       // Force Vite to use standard polling/port options if WebSockets drop
       hmr: process.env.DISABLE_HMR === 'true' ? false : {
-        protocol: 'ws',
+        protocol: 'wss',
         host: 'localhost',
         port: 5173,
-        clientPort: 5173,
+        clientPort: 443,
       },
       // Alternative for cloud IDE environments:
       watch: process.env.DISABLE_HMR === 'true' ? null : {
