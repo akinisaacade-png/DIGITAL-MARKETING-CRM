@@ -804,7 +804,7 @@ app.post(["/api/stripe/create-checkout-session", "/api/checkout"], async (req, r
       success_url: `${appUrl}/dashboard?session_id={CHECKOUT_SESSION_ID}&status=success&tier=${activeTier}&planType=${activeTier}`,
       cancel_url: `${appUrl}/billing?status=cancelled`,
       client_reference_id: activeUserId,
-      customer_email: (activeEmail && activeEmail.trim().toLowerCase() !== "akinisaacade@gmail.com") ? activeEmail : undefined,
+      customer_email: activeEmail ? String(activeEmail).trim().toLowerCase() : undefined,
       metadata: {
         userId: activeUserId,
         tier: activeTier
@@ -882,7 +882,7 @@ app.post("/api/auth/register-and-subscribe", async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       payment_method_types: ["card"],
-      customer_email: (email && String(email).trim().toLowerCase() !== "akinisaacade@gmail.com") ? String(email).trim().toLowerCase() : undefined,
+      customer_email: email ? String(email).trim().toLowerCase() : undefined,
       line_items: [
         {
           price: priceId,

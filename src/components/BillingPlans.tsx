@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { loadStripe } from "@stripe/stripe-js";
-import { Zap, Sparkles, CheckCircle2, ShieldCheck } from "lucide-react";
+import { Zap, Sparkles, CheckCircle2, ShieldCheck, Copy, Check, Terminal } from "lucide-react";
 import StripeDirectCheckout from "./StripeDirectCheckout";
 
 // Initialize Stripe with the user's provided publishable key
@@ -14,6 +14,76 @@ export default function BillingPlans({ userEmail }: BillingPlansProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedQuickPlan, setSelectedQuickPlan] = useState<"monthly" | "yearly">("monthly");
+  const [activeCodeTab, setActiveCodeTab] = useState<"python" | "nodejs" | "php">("python");
+  const [copied, setCopied] = useState(false);
+
+  const pythonCode = `import stripe
+stripe.api_key = "your_secret_key_here"
+
+def create_subscription_session(customer_email):
+    session = stripe.checkout.Session.create(
+        mode="subscription",
+        customer_email=customer_email,
+        payment_method_types=["card"], # Forces standard card entry, bypassing Link verification
+        line_items=[
+            {
+                "price": "price_1234XYZ", # Replace with your Price ID
+                "quantity": 1,
+            },
+        ],
+        success_url="https://your-site.com/success",
+        cancel_url="https://your-site.com/cancel",
+    )
+    return session.url`;
+
+  const nodeCode = `const stripe = require('stripe')('your_secret_key_here');
+
+async function createSubscriptionSession(customerEmail) {
+  const session = await stripe.checkout.sessions.create({
+    mode: 'subscription',
+    customer_email: customerEmail, // Optional: pre-fills email safely without triggering Link
+    payment_method_types: ['card'], // CRITICAL: Only allow standard card inputs
+    line_items: [
+      {
+        price: 'price_1234XYZ', // Replace with your monthly/annual subscription Price ID
+        quantity: 1,
+      },
+    ],
+    success_url: 'https://your-site.com/success?session_id={CHECKOUT_SESSION_ID}',
+    cancel_url: 'https://your-site.com/cancel',
+  });
+
+  return session.url;
+}`;
+
+  const phpCode = `require 'vendor/autoload.php';
+$stripe = new \\Stripe\\StripeClient('your_secret_key_here');
+
+$session = $stripe->checkout->sessions->create([
+  'mode' => 'subscription',
+  'customer_email' => 'customer@example.com',
+  'payment_method_types' => ['card'], // Disables accelerated wallet/Link features
+  'line_items' => [[
+    'price' => 'price_1234XYZ',
+    'quantity' => 1,
+  ]],
+  'success_url' => 'https://your-site.com/success',
+  'cancel_url' => 'https://your-site.com/cancel',
+]);
+
+header("Location: " . $session->url);`;
+
+  const handleCopyCode = () => {
+    let codeToCopy = pythonCode;
+    if (activeCodeTab === "nodejs") {
+      codeToCopy = nodeCode;
+    } else if (activeCodeTab === "php") {
+      codeToCopy = phpCode;
+    }
+    navigator.clipboard.writeText(codeToCopy);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   const handleSubscribe = async (planType: "monthly" | "yearly") => {
     setLoading(true);
@@ -161,6 +231,95 @@ export default function BillingPlans({ userEmail }: BillingPlansProps) {
           currentPlanType={selectedQuickPlan}
           userEmail={userEmail || "customer@example.com"}
         />
+      </div>
+
+      {/* Developer API Integration Section */}
+      <div className="border-t border-slate-100 pt-5 mt-4 space-y-4" id="developer-stripe-sdk-section">
+        <div className="bg-slate-900 rounded-xl p-5 text-white shadow-md border border-slate-800 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Terminal size={16} className="text-indigo-400" />
+              <div>
+                <h4 className="text-xs font-bold tracking-tight text-slate-100">Stripe Backend API Integration</h4>
+                <p className="text-[10px] text-slate-400 mt-0.5">
+                  Connect your top-of-funnel marketing leads with secure checkout session flows.
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={handleCopyCode}
+              className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-bold rounded-lg border border-slate-700 transition-all flex items-center gap-1 cursor-pointer"
+              title="Copy checkout session code snippet"
+            >
+              {copied ? (
+                <>
+                  <Check size={11} className="text-emerald-400" />
+                  <span className="text-emerald-400">Copied!</span>
+                </>
+              ) : (
+                <>
+                  <Copy size={11} />
+                  <span>Copy Code</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Tab selectors */}
+          <div className="flex gap-2 border-b border-slate-800 pb-2">
+            <button
+              onClick={() => setActiveCodeTab("python")}
+              className={`pb-1.5 px-1 text-[11px] font-bold border-b-2 transition-all cursor-pointer ${
+                activeCodeTab === "python"
+                  ? "border-indigo-400 text-indigo-400"
+                  : "border-transparent text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              Python SDK
+            </button>
+            <button
+              onClick={() => setActiveCodeTab("nodejs")}
+              className={`pb-1.5 px-1 text-[11px] font-bold border-b-2 transition-all cursor-pointer ${
+                activeCodeTab === "nodejs"
+                  ? "border-indigo-400 text-indigo-400"
+                  : "border-transparent text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              Node.js SDK
+            </button>
+            <button
+              onClick={() => setActiveCodeTab("php")}
+              className={`pb-1.5 px-1 text-[11px] font-bold border-b-2 transition-all cursor-pointer ${
+                activeCodeTab === "php"
+                  ? "border-indigo-400 text-indigo-400"
+                  : "border-transparent text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              PHP SDK
+            </button>
+          </div>
+
+          {/* Code Viewer */}
+          <div className="bg-slate-950 rounded-lg p-3.5 border border-slate-800/80 overflow-x-auto">
+            <pre className="font-mono text-[10px] text-slate-300 leading-relaxed whitespace-pre">
+              <code>
+                {activeCodeTab === "python"
+                  ? pythonCode
+                  : activeCodeTab === "nodejs"
+                  ? nodeCode
+                  : phpCode}
+              </code>
+            </pre>
+          </div>
+
+          <div className="flex items-start gap-1.5 text-[9px] text-slate-400 leading-normal font-mono">
+            <span className="text-indigo-400 shrink-0">ℹ️ Note:</span>
+            <p>
+              Setting <code className="text-slate-200">payment_method_types: ["card"]</code> is critical for direct checkout gates. It bypasses mobile browser Link login overlays, guaranteeing friction-free conversion loops for incoming marketing leads.
+            </p>
+          </div>
+        </div>
       </div>
     </div>
   );
