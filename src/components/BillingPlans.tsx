@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { loadStripe } from "@stripe/stripe-js";
-import { Zap, Sparkles, CheckCircle2 } from "lucide-react";
+import { Zap, Sparkles, CheckCircle2, ShieldCheck } from "lucide-react";
+import StripeDirectCheckout from "./StripeDirectCheckout";
 
 // Initialize Stripe with the user's provided publishable key
 const stripePromise = loadStripe("pk_live_Y8I4kIWBXPdQIfZ2tthPIFwV00DlqCjZva");
@@ -12,6 +13,7 @@ interface BillingPlansProps {
 export default function BillingPlans({ userEmail }: BillingPlansProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedQuickPlan, setSelectedQuickPlan] = useState<"monthly" | "yearly">("monthly");
 
   const handleSubscribe = async (planType: "monthly" | "yearly") => {
     setLoading(true);
@@ -116,6 +118,49 @@ export default function BillingPlans({ userEmail }: BillingPlansProps) {
             {loading ? "Processing..." : "Subscribe Yearly"}
           </button>
         </div>
+      </div>
+
+      {/* Stripe Secure Direct Checkout Section */}
+      <div className="border-t border-slate-100 pt-5 mt-4 space-y-4" id="direct-checkout-quick-section">
+        <div className="flex items-center justify-between bg-slate-100/50 p-4 rounded-xl border border-slate-200/50">
+          <div className="space-y-0.5">
+            <h4 className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+              <ShieldCheck className="text-[#6772e5]" size={14} />
+              Stripe Direct Handoff Gateway
+            </h4>
+            <p className="text-[10px] text-slate-400">
+              One-click instant payment processing without mobile browser restrictions.
+            </p>
+          </div>
+          
+          <div className="flex bg-white border border-slate-200 rounded-lg p-0.5 text-[10px] font-bold">
+            <button
+              onClick={() => setSelectedQuickPlan("monthly")}
+              className={`px-3 py-1 rounded-md transition-all cursor-pointer ${
+                selectedQuickPlan === "monthly"
+                  ? "bg-slate-900 text-white"
+                  : "text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              Monthly Pro
+            </button>
+            <button
+              onClick={() => setSelectedQuickPlan("yearly")}
+              className={`px-3 py-1 rounded-md transition-all cursor-pointer ${
+                selectedQuickPlan === "yearly"
+                  ? "bg-slate-900 text-white"
+                  : "text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              Yearly Elite
+            </button>
+          </div>
+        </div>
+
+        <StripeDirectCheckout
+          currentPlanType={selectedQuickPlan}
+          userEmail={userEmail || "customer@example.com"}
+        />
       </div>
     </div>
   );

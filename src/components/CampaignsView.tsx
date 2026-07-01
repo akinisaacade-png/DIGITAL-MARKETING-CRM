@@ -33,6 +33,7 @@ import {
   ResponsiveContainer 
 } from "recharts";
 import { Campaign } from "../types";
+import { safeCRMRequest } from "../lib/api";
 
 export const BUDGET_LIMITS: Record<string, number> = {
   "Facebook Ads": 5000,
@@ -83,9 +84,8 @@ Tone: ${toneOfVoice}
 
 Generate exactly 3 creative ad variations (e.g. ad headlines, primary texts, and call-to-actions) optimized specifically for the unique audience and placement layout of ${selectedPlatformForCopy}. Label each clearly so the user can easily deploy them.`;
 
-      const res = await fetch("/api/gemini/orchestrate", {
+      const data = await safeCRMRequest<any>("/api/gemini/orchestrate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: promptText,
           mode: "campaign_content",
@@ -97,14 +97,14 @@ Generate exactly 3 creative ad variations (e.g. ad headlines, primary texts, and
           }
         })
       });
-      const data = await res.json();
-      if (data.success && data.text) {
+      if (data && "success" in data && data.success && data.text) {
         setGeneratedCopy(data.text);
         if (onAddActivity) {
           onAddActivity("system", `✍️ Generated custom ad variations for ${selectedPlatformForCopy} targeting ${targetAudience}`);
         }
       } else {
-        setGeneratedCopy("Failed to generate campaign copy. Please check your API key configuration.");
+        const msg = (data && "message" in data) ? data.message : "Failed to generate campaign copy. Please check your API key configuration.";
+        setGeneratedCopy(msg);
       }
     } catch (err) {
       console.error("Failed to generate ad copy:", err);

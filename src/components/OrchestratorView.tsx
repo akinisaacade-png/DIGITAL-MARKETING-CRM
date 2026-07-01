@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { safeCRMRequest } from "../lib/api";
 import { 
   Sparkles, 
   Cpu, 
@@ -176,17 +177,22 @@ export default function OrchestratorView() {
     setResponse(null);
 
     try {
-      const res = await fetch("/api/gemini/orchestrate", {
+      const data = await safeCRMRequest<any>("/api/gemini/orchestrate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt,
           mode
         })
       });
 
-      const data = await res.json();
-      setResponse(data);
+      if (data && "error" in data && data.error) {
+        setResponse({
+          success: false,
+          error: data.message || "Failed to orchestrate task."
+        });
+      } else {
+        setResponse(data);
+      }
     } catch (err: any) {
       setResponse({
         success: false,

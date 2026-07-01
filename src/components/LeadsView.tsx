@@ -24,6 +24,7 @@ import {
   Activity as ActivityIcon
 } from "lucide-react";
 import { Lead, Agent, Activity } from "../types";
+import { safeCRMRequest } from "../lib/api";
 
 // Dynamic SVG-based mini sparkline component for 30-day score history visualization
 const LeadScoreSparkline = ({ score, id }: { score: number; id: string }) => {
@@ -210,19 +211,17 @@ export default function LeadsView({
       }
 
       // Now query crm_lead_scoring_agent to recalculate score
-      const res = await fetch("/api/gemini/orchestrate", {
+      const data = await safeCRMRequest<any>("/api/gemini/orchestrate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: `Calculate a new numeric lead score between 1 and 100 for lead '${lead.name}' who has been updated to stage '${newStage}'. Source is '${lead.source}' and value is $${lead.value}. Return a JSON object containing exactly 'score' (number) and 'rationale' (string), e.g. {"score": 85, "rationale": "Explanation of score"}.`,
           mode: "lead"
         })
       });
-      const data = await res.json();
       let calculatedScore = lead.score;
       let rationaleText = "";
 
-      if (data.success && data.text) {
+      if (data && "success" in data && data.success && data.text) {
         const text = data.text;
         try {
           const jsonMatch = text.match(/\{[\s\S]*?\}/);

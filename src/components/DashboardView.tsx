@@ -41,6 +41,7 @@ import {
   Bar
 } from "recharts";
 import { Lead, Campaign, Activity, MaintenanceStatus } from "../types";
+import { safeCRMRequest } from "../lib/api";
 
 interface DashboardViewProps {
   leads: Lead[];
@@ -73,24 +74,23 @@ export default function DashboardView({
   const fetchRoiPrediction = async () => {
     setIsPredicting(true);
     try {
-      const res = await fetch("/api/gemini/orchestrate", {
+      const data = await safeCRMRequest<{ success?: boolean; text?: string }>("/api/gemini/orchestrate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: "Analyze our ad campaigns (CTR, CPC, Conversions, Spent, and ROI) and CRM leads dataset. Estimate and predict our overall average ROI multiplier for the next 30 days. Provide a clear prediction number (e.g., '4.1x') and a 1-sentence analytical rationale.",
           mode: "analytics"
         })
       });
-      const data = await res.json();
-      if (data.success && data.text) {
+      if (data && "success" in data && data.success && data.text) {
         const text = data.text;
         const roiMatch = text.match(/(\d+\.\d+)x/i) || text.match(/ROI.*?(\d+\.\d+)/i) || text.match(/(\d+\.\d+)/i);
         const roiVal = roiMatch ? `${roiMatch[1]}x` : "4.1x";
         setPredictedRoi(roiVal);
         setPredictionDetail(text);
       } else {
+        const msg = (data && "message" in data) ? data.message : "Predicted next-month campaign return on investment based on historical averages.";
         setPredictedRoi("4.1x");
-        setPredictionDetail("Predicted next-month campaign return on investment based on historical averages.");
+        setPredictionDetail(msg);
       }
     } catch (err) {
       console.error("Failed to fetch ROI prediction:", err);

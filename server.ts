@@ -804,7 +804,7 @@ app.post(["/api/stripe/create-checkout-session", "/api/checkout"], async (req, r
       success_url: `${appUrl}/dashboard?session_id={CHECKOUT_SESSION_ID}&status=success&tier=${activeTier}&planType=${activeTier}`,
       cancel_url: `${appUrl}/billing?status=cancelled`,
       client_reference_id: activeUserId,
-      customer_email: activeEmail || undefined,
+      customer_email: (activeEmail && activeEmail.trim().toLowerCase() !== "akinisaacade@gmail.com") ? activeEmail : undefined,
       metadata: {
         userId: activeUserId,
         tier: activeTier
@@ -882,7 +882,7 @@ app.post("/api/auth/register-and-subscribe", async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       payment_method_types: ["card"],
-      customer_email: String(email).trim().toLowerCase(),
+      customer_email: (email && String(email).trim().toLowerCase() !== "akinisaacade@gmail.com") ? String(email).trim().toLowerCase() : undefined,
       line_items: [
         {
           price: priceId,
@@ -2542,6 +2542,229 @@ How else can I help you adjust your funnel metrics today?`;
       success: true, 
       text: `👋 **Hello!** I am currently running in offline preview mode. Based on current parameters, I recommend optimizing Google Search ads and setting up automated email templates for leads stuck in the Contacted stage.` 
     });
+  }
+});
+
+app.post("/api/gemini/quick-replies", async (req, res) => {
+  const { leadName, leadStage, leadCompany, leadSource, leadValue, activities = [] } = req.body || {};
+
+  const getStaticTemplates = (name: string, stage: string, company: string, source: string, value: number, activitiesList: string[]): any[] => {
+    const comp = company || "your company";
+    const valFormatted = value ? `$${value.toLocaleString()}` : "your services";
+    
+    switch(stage) {
+      case "New":
+        return [
+          {
+            id: "new-1",
+            title: "⚡ Instant Warm Welcome",
+            channel: "email",
+            subject: `Exciting possibilities for ${comp} 🚀`,
+            body: `Hi ${name},\n\nThanks for reaching out! I saw that you connected with us through ${source}. I've been reviewing your background and would love to learn more about your goals at ${comp}.\n\nAre you available for a brief 10-minute discovery call this Wednesday or Thursday?\n\nBest regards,\n[Your Name]`
+          },
+          {
+            id: "new-2",
+            title: "🤝 High-Value Value Proposition",
+            channel: "linkedin",
+            body: `Hi ${name}, welcome! I noticed your interest in our growth solutions. Given your work at ${comp}, I wanted to share a quick case study of how we helped a similar business scale their digital ad pipeline by 40%. Would love to exchange some ideas if you're open to it!`
+          },
+          {
+            id: "new-3",
+            title: "📞 Quick Intro Touchpoint",
+            channel: "sms",
+            body: `Hi ${name}, this is [Your Name] from the Growth Team. Thanks for checking us out! I'd love to set up a quick 5-min intro chat to see how we can support ${comp}. Do you prefer a call or text?`
+          }
+        ];
+      case "Contacted":
+        return [
+          {
+            id: "contacted-1",
+            title: "📈 Solving Core Friction Point",
+            channel: "email",
+            subject: `Quick ideas to optimize marketing for ${comp}`,
+            body: `Hi ${name},\n\nFollowing up on our initial touchpoint. I was analyzing typical conversion bottlenecks for businesses using ${source} campaigns and noticed that decreasing landing page friction can elevate conversion by up to 25%.\n\nI put together some quick recommendations specifically tailored for ${comp}.\n\nWould you be open to a quick call to go over these?\n\nBest,\n[Your Name]`
+          },
+          {
+            id: "contacted-2",
+            title: "👋 Friendly Check-in",
+            channel: "linkedin",
+            body: `Hi ${name}, just wanted to check if you had a chance to look at the resource I sent earlier? I know things get busy at ${comp}. Let me know if you have any questions or if you'd like to dive deeper into conversion optimization.`
+          },
+          {
+            id: "contacted-3",
+            title: "🗓️ Calendar Invitation",
+            channel: "email",
+            subject: `Meeting invitation: Growth Strategy for ${comp}`,
+            body: `Hi ${name},\n\nI hope your week is going well!\n\nI'd love to schedule a dedicated 15-minute strategy call to map out a clear funnel roadmap for ${comp}. \n\nYou can book a time directly on my calendar here: [Your Calendar Link].\n\nLooking forward to speaking with you!\n\nBest,\n[Your Name]`
+          }
+        ];
+      case "Qualified":
+        return [
+          {
+            id: "qualified-1",
+            title: "🏆 Industry Benchmarks Custom Share",
+            channel: "email",
+            subject: `Industry Performance Benchmark Report for ${comp}`,
+            body: `Hi ${name},\n\nBased on our assessment of ${comp}'s current digital campaigns, your metrics are positioned for significant leverage.\n\nCompared to industry average benchmarks ($1.84 CPC and 2.15% CTR), we've identified three specific areas in your funnel where we can boost ROI.\n\nLet's schedule some time to look at the custom diagnostic report we prepared.\n\nBest regards,\n[Your Name]`
+          },
+          {
+            id: "qualified-2",
+            title: "💡 Tailored Campaign Teaser",
+            channel: "linkedin",
+            body: `Hi ${name}, great news - our marketing design team just finalized the campaign concept ideas for ${comp}. I think you'll love the conversion ad structure we sketched out. Let's do a quick screen-share tomorrow so I can walk you through it.`
+          },
+          {
+            id: "qualified-3",
+            title: "🚀 Value Realization Proposal Prep",
+            channel: "email",
+            subject: `Next steps towards building ${comp}'s custom funnel`,
+            body: `Hi ${name},\n\nIt was great discussing your growth goals. I am drafting a customized growth proposal worth ${valFormatted} in pipeline optimization value for ${comp}.\n\nTo ensure we cover all your technical constraints, could you confirm who on your team handles Google Ads attribution?\n\nThank you,\n[Your Name]`
+          }
+        ];
+      case "Proposal":
+        return [
+          {
+            id: "proposal-1",
+            title: "📑 Proposal Walkthrough Request",
+            channel: "email",
+            subject: `Reviewing your custom growth proposal - ${comp}`,
+            body: `Hi ${name},\n\nI have finished drafting your custom marketing acceleration proposal for ${comp}, valued at ${valFormatted}.\n\nThis roadmap is designed to directly target a lower Cost-Per-Click while scaling your lead pipeline.\n\nWhen do you have 15 minutes this week for a quick screen-share walkthrough to address any feedback?\n\nBest,\n[Your Name]`
+          },
+          {
+            id: "proposal-2",
+            title: "🎯 ROI Assessment & Decision Support",
+            channel: "email",
+            subject: `ROI Projection and Next Steps for ${comp}`,
+            body: `Hi ${name},\n\nI hope you're having a productive day!\n\nTo help your team make an informed decision on the ${valFormatted} proposal, we've compiled a conservative ROI projection model. Based on your current lead volume, we estimate a 22% lift in sales operations value over the first 60 days.\n\nLet me know if you would like me to send over the Excel model or hop on a short call.\n\nBest,\n[Your Name]`
+          },
+          {
+            id: "proposal-3",
+            title: "⏳ Deadline & Momentum Builder",
+            channel: "linkedin",
+            body: `Hi ${name}, our media onboarding slots for next month are filling up fast! If we can finalize the proposal details for ${comp} this week, we can lock in your launch schedule and begin our copy research phase on Monday. Let me know if you have any questions I can answer.`
+          }
+        ];
+      case "Won":
+        return [
+          {
+            id: "won-1",
+            title: "🎉 Onboarding Kickoff Welcome",
+            channel: "email",
+            subject: `Welcome to the Growth Family! Kickoff details for ${comp} 🎉`,
+            body: `Hi ${name},\n\nWe are absolutely thrilled to partner with ${comp}! Welcome aboard.\n\nTo kick things off smoothly, our strategy team has scheduled our onboarding call for this coming week. \n\nPlease complete this quick 3-minute intake form before the session so we can hit the ground running: [Link to Form].\n\nLet's build something incredible together!\n\nWarmly,\n[Your Name]`
+          },
+          {
+            id: "won-2",
+            title: "🛠️ Immediate Implementation Action Steps",
+            channel: "email",
+            subject: `Immediate setup steps for ${comp}'s ad campaign`,
+            body: `Hi ${name},\n\nNow that our partnership is officially active, we are moving straight into implementation.\n\nCould you please share secure access to your Google Ads and Facebook Business Manager accounts? Here is a simple 1-minute guide on how to do that: [Guide Link].\n\nWe'll verify access once received and begin our preliminary audits.\n\nBest regards,\n[Your Name]`
+          },
+          {
+            id: "won-3",
+            title: "🌟 Customer Delight & Referral Request",
+            channel: "linkedin",
+            body: `Hi ${name}, thrilled to have ${comp} onboarded! We're already making great progress on your search campaigns. If you know any other founders or executives looking to scale their digital marketing or optimize their CRM, we'd be honored by an introduction! Have an awesome week.`
+          }
+        ];
+      case "Lost":
+        return [
+          {
+            id: "lost-1",
+            title: "📝 Constructive Feedback Survey",
+            channel: "email",
+            subject: `Thank you from our team - Feedback request for ${comp}`,
+            body: `Hi ${name},\n\nThank you for taking the time to evaluate our services for ${comp}. Although we weren't able to partner this time around, we truly enjoyed learning about your business.\n\nWe are always striving to improve. If you have 60 seconds, could you share what the primary factor was in your decision (e.g., budget, timing, scope)?\n\nWe appreciate your candor and wish ${comp} immense success!\n\nWarmly,\n[Your Name]`
+          },
+          {
+            id: "lost-2",
+            title: "🌱 Long-Term Nurture / Keeping Warm",
+            channel: "linkedin",
+            body: `Hi ${name}, completely understand that the timing wasn't right for ${comp} to kick off the new campaign. Let's stay connected here. I'll continue sharing useful digital marketing insights, and when your team is ready to scale in the future, our doors are always open!`
+          },
+          {
+            id: "lost-3",
+            title: "📂 Closed File / Re-Open Door Offer",
+            channel: "email",
+            subject: `Re-opening the conversation: Growth update for ${comp}`,
+            body: `Hi ${name},\n\nI hope your quarter is off to an incredible start!\n\nI'm checking back in because we recently rolled out a new high-efficiency campaign structure that has significantly lowered Cost-Per-Click for our clients.\n\nIf ${comp} is looking to expand your pipeline again, I'd love to share the updated case studies.\n\nLet me know if you'd be open to a brief chat.\n\nBest,\n[Your Name]`
+          }
+        ];
+      default:
+        return [
+          {
+            id: "gen-1",
+            title: "👋 Quick Growth Follow-up",
+            channel: "email",
+            subject: `Growth opportunities for ${comp}`,
+            body: `Hi ${name},\n\nI hope you're having a great week!\n\nI wanted to share a quick idea to boost conversion rates for ${comp} based on standard digital marketing frameworks.\n\nLet me know if you have 5 minutes to connect.\n\nBest,\n[Your Name]`
+          },
+          {
+            id: "gen-2",
+            title: "🤝 Stay Connected",
+            channel: "linkedin",
+            body: `Hi ${name}, hope you are doing well! Let's stay in touch and exchange insights about digital scaling and CRM intelligence.`
+          },
+          {
+            id: "gen-3",
+            title: "⚡ Quick Touchpoint",
+            channel: "sms",
+            body: `Hi ${name}, this is [Your Name] from the Growth Team. Let me know if we can assist ${comp} with any marketing analytics or optimization!`
+          }
+        ];
+    }
+  };
+
+  const name = leadName || "Prospect";
+  const stage = leadStage || "New";
+  const company = leadCompany || "their company";
+  const source = leadSource || "Website";
+  const value = Number(leadValue) || 0;
+
+  if (!ai) {
+    const tpls = getStaticTemplates(name, stage, company, source, value, activities);
+    return res.json({ success: true, templates: tpls, isDemo: true });
+  }
+
+  try {
+    const systemInstruction = `You are an expert digital marketing copywriter and AI CRM communications assistant.
+Your task is to generate exactly three (3) highly customized, persuasive, and channel-specific quick-reply communication templates (such as emails, LinkedIn messages, or SMS) for the selected CRM lead.
+You must analyze:
+1. The lead's current stage in the marketing funnel (${stage}).
+2. The lead's past communication and activity history: ${JSON.stringify(activities)}.
+3. The lead's company (${company}), acquisition source (${source}), and estimated deal value ($${value.toLocaleString()}).
+
+Generate exactly 3 templates. Output them strictly as a valid JSON array of objects with the following properties:
+- id: a unique short string ID (e.g. "tpl-1", "tpl-2", "tpl-3")
+- title: a concise, catchy name for the template indicating its strategy (e.g., "⚡ Urgent Discovery Call Booking", "📈 Value-First Performance Diagnostic")
+- channel: one of "email", "linkedin", "sms", "general"
+- subject: string (strictly required if channel is "email", omit or leave empty for other channels)
+- body: string (the actual message copy. Use placeholders like [Your Name] or [Calendar Link] appropriately. Personalize it with the lead's name "${name}", their company "${company}", their acquisition channel "${source}", or value if relevant. Integrate elements from their past activity history so it feels incredibly warm, bespoke, and tailored).
+
+Do NOT output any markdown formatting, markdown wrappers, or backticks around the JSON. Your entire response must be a single, valid JSON array.`;
+
+    const response = await callWithRetry(() => ai!.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: "Generate 3 quick-reply templates.",
+      config: {
+        systemInstruction,
+        temperature: 0.7,
+        responseMimeType: "application/json"
+      }
+    }));
+
+    const text = response.text || "";
+    let templates = JSON.parse(text.trim());
+    
+    if (Array.isArray(templates) && templates.length > 0) {
+      return res.json({ success: true, templates, isDemo: false });
+    } else {
+      throw new Error("Invalid format returned by Gemini");
+    }
+  } catch (error: any) {
+    console.warn("Gemini quick-replies generation error, falling back to static templates:", error?.message || error);
+    const tpls = getStaticTemplates(name, stage, company, source, value, activities);
+    return res.json({ success: true, templates: tpls, isDemo: true, error: error?.message });
   }
 });
 

@@ -448,7 +448,7 @@ export default function App() {
       case "orchestrator":
         return <OrchestratorView />;
       case "chatbot":
-        return <ChatbotView leads={leads} />;
+        return <ChatbotView leads={leads} activities={activities} />;
       case "maintenance":
         return <MaintenanceView status={maintenanceStatus} onRunAgentAction={handleRunAgentAction} />;
       case "settings":
