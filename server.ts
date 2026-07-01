@@ -3595,12 +3595,6 @@ ${cleanedInput}
 // --- START SERVER AND VITE MIDDLEWARE ---
 
 async function startServer() {
-  // Check and seed the database if Firestore is active and collections are empty
-  await seedDatabaseIfEmpty();
-
-  // Start automated background lead scoring
-  startLeadScoringService();
-
   if (process.env.NODE_ENV !== "production") {
     console.log("Setting up Vite middleware for development...");
     const vite = await createViteServer({
@@ -3619,6 +3613,14 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server is running on http://0.0.0.0:${PORT}`);
+    
+    // Check and seed the database if Firestore is active and collections are empty in the background
+    seedDatabaseIfEmpty().catch(err => {
+      console.error("Error in background database seeding:", err);
+    });
+
+    // Start automated background lead scoring
+    startLeadScoringService();
   });
 }
 
